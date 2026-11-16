@@ -48,6 +48,9 @@ In short: the box is at `http://<box LAN IP>:7210`.
   after a power cut. Android 10+ only lets the receiver open the screen if the app may
   "display over other apps": grant it in the app's settings panel, or
   `adb shell appops set com.bargames.venuebox SYSTEM_ALERT_WINDOW allow`.
+- Locked to landscape (`sensorLandscape`). Tablets/phones get an opt-in home-screen mode
+  (`HomeMode`): the manifest's `HomeAlias` (category HOME) is disabled until staff turn it on in
+  the settings panel, then Android's home-app setting opens. Hidden on TVs.
 - Address fallback: the settings panel always offers "type the box address" (host or
   host:port). The emulator sits behind NAT and can't see mDNS; some venue networks block it.
 - Sideloaded APK, no Play Store. Signed with the debug key for now: an APK built on another

@@ -22,12 +22,25 @@ Download `venuebox-<version>.apk` from [Releases](../../releases) and sideload i
 3. Done: the TV now appears on the box's TVs page like any other display.
 
 To come back by itself after a power cut, the app needs **Display over other apps**. The settings
-panel shows "Start on the TV at boot: needs 'Display over other apps' → Grant" until it has it.
+panel shows "Start at boot: needs 'Display over other apps' → Grant" until it has it.
 If the TV has no settings page for that permission, grant it from a computer:
 
 ```
 adb shell appops set com.bargames.venuebox SYSTEM_ALERT_WINDOW allow
 ```
+
+## Tablets and phones
+
+The same APK runs on Android tablets and phones (Android 8+), always in landscape. Open the
+settings panel with the back gesture or button.
+
+- **Start at boot** works as on a TV (grant "Display over other apps"), but Android waits for the
+  first unlock: set the screen lock to None or Swipe. Some brands also block apps at boot until
+  you allow "auto-start" or turn off battery optimization for Venuebox.
+- **Home-screen mode**, for a tablet that only shows games: settings panel → Home screen →
+  **Turn on**, then pick Venuebox as the home app (Always). It then comes back after every reboot
+  and on the home button, with no other permission. **Turn off** gives the normal home screen
+  back. Not offered on TVs: Google TV doesn't allow another home app.
 
 ## Build
 

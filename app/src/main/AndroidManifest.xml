@@ -28,6 +28,7 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
             android:exported="true"
             android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
             android:windowSoftInputMode="adjustPan">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -35,6 +36,20 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Home-screen mode for dedicated tablets: off until staff turn it on in the settings
+             panel (HomeMode), so the app only offers itself as a home app when asked to. -->
+        <activity-alias
+            android:name=".android.HomeAlias"
+            android:enabled="false"
+            android:exported="true"
+            android:targetActivity=".android.MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity-alias>
 
         <receiver
             android:name=".android.BootReceiver"

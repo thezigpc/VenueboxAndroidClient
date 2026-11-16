@@ -91,6 +91,11 @@ class MainActivity : Activity(), ScreenUi {
     private lateinit var nameInput: EditText
     private lateinit var autostartNote: TextView
     private lateinit var grantButton: Button
+    private val home by lazy { HomeMode(this) }
+    private lateinit var homeSection: LinearLayout
+    private lateinit var homeNote: TextView
+    private lateinit var homeToggle: Button
+    private lateinit var homeChoose: Button
     private lateinit var firstButton: Button
 
     /** The URL the box asked for; null → off. */
@@ -568,15 +573,28 @@ class MainActivity : Activity(), ScreenUi {
         if (addressInput.text.isEmpty()) ctl.config.box?.let { addressInput.setText(it.removePrefix("http://")) }
         nameInput.hint = ctl.defaultName()
         if (nameInput.text.isEmpty()) ctl.config.name?.let { nameInput.setText(it) }
-        val canStart = Settings.canDrawOverlays(this)
-        autostartNote.text = if (canStart) {
-            "Start on the TV at boot: on."
-        } else {
-            "Start on the TV at boot: needs “Display over other apps” → Grant.\n" +
+        val isHome = !ctl.isTv() && home.enabled && home.isHome
+        val canStart = isHome || Settings.canDrawOverlays(this)
+        autostartNote.text = when {
+            isHome -> "Start at boot: on (Venuebox is the home screen)."
+            canStart -> "Start at boot: on." +
+                if (ctl.isTv()) "" else "\nA screen lock (PIN, pattern) holds it until someone unlocks: use None or Swipe."
+            else -> "Start at boot: needs “Display over other apps” → Grant.\n" +
                 "(Or from a computer: adb shell appops set $packageName SYSTEM_ALERT_WINDOW allow)"
         }
         autostartNote.setTextColor(if (canStart) 0xFFB8BCC6.toInt() else Color.WHITE)
         grantButton.visibility = if (canStart) View.GONE else View.VISIBLE
+
+        // Google TV and most TV sticks don't let another app be the home screen: tablets/phones only.
+        homeSection.visibility = if (ctl.isTv()) View.GONE else View.VISIBLE
+        homeNote.text = when {
+            !home.enabled -> "Off. Turn on to make Venuebox this device's home screen: back after every " +
+                "reboot and on the home button, with no other permission."
+            !isHome -> "On, but not picked yet: choose Venuebox as the home app (Always)."
+            else -> "On: Venuebox is the home screen. Turn off for the normal home screen."
+        }
+        homeToggle.text = if (home.enabled) "Turn off" else "Turn on"
+        homeChoose.visibility = if (home.enabled && !isHome) View.VISIBLE else View.GONE
     }
 
     // ---------------------------------------------------------------- UI building
@@ -676,6 +694,22 @@ class MainActivity : Activity(), ScreenUi {
             }
         }
         col.addView(grantButton)
+
+        homeSection = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        homeSection.addView(heading("Home screen (dedicated tablets)"))
+        homeNote = note("")
+        homeSection.addView(homeNote)
+        homeToggle = button("Turn on") {
+            val on = !home.enabled
+            home.set(on)
+            if (on) home.choose(this)
+            addressMsg.text = if (on) "Home-screen mode on: pick Venuebox as the home app." else "Home-screen mode off."
+            refreshPanel()
+        }
+        homeSection.addView(homeToggle)
+        homeChoose = button("Choose the home app") { home.choose(this) }
+        homeSection.addView(homeChoose)
+        col.addView(homeSection)
 
         col.addView(heading("Pairing"))
         col.addView(button("Unpair (show a new code)") { ctl.unpair(); addressMsg.text = "Unpaired." })
