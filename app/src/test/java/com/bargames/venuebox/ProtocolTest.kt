@@ -135,6 +135,22 @@ class ProtocolTest {
     }
 
     @Test
+    fun decodesTheBoxsIdleDataUrl() {
+        val html = "<!doctype html><meta name=viewport content=\"width=device-width\"><body data-live=\"x\">Café 100% + more #1</body>"
+        val encoded = java.net.URLEncoder.encode(html, "UTF-8").replace("+", "%20")
+        val d = com.bargames.venuebox.protocol.DataUrl.parse("data:text/html;charset=utf-8,$encoded")!!
+        assertEquals("text/html", d.mime)
+        assertEquals(html, d.text)
+        // '+' is literal in data URLs (not a space) and bare characters pass through.
+        assertEquals("a+b <i>", com.bargames.venuebox.protocol.DataUrl.parse("data:text/html,a+b%20<i>")!!.text)
+        val b64 = java.util.Base64.getEncoder().encodeToString("<p>hi</p>".toByteArray())
+        assertEquals("<p>hi</p>", com.bargames.venuebox.protocol.DataUrl.parse("data:text/html;base64,$b64")!!.text)
+        assertEquals("text/plain", com.bargames.venuebox.protocol.DataUrl.parse("data:,x")!!.mime)
+        assertNull(com.bargames.venuebox.protocol.DataUrl.parse("data:text/html"))
+        assertNull(com.bargames.venuebox.protocol.DataUrl.parse("http://box/"))
+    }
+
+    @Test
     fun webSocketUrl() {
         assertEquals("ws://192.168.1.20:7210/client", BoxAddress.wsUrl("http://192.168.1.20:7210"))
         assertEquals("wss://box:443/client", BoxAddress.wsUrl("https://box:443"))

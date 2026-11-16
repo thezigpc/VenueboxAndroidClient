@@ -50,6 +50,7 @@ import com.bargames.venuebox.client.ClientStatus
 import com.bargames.venuebox.protocol.BoxAddress
 import com.bargames.venuebox.protocol.BoxMsg
 import com.bargames.venuebox.protocol.ClientMsg
+import com.bargames.venuebox.protocol.DataUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
@@ -98,6 +99,8 @@ class MainActivity : Activity(), ScreenUi {
     private var panelShownForNoBox = false
     /** The 1920-px viewport is injected at document start (else after load, see [viewportJs]). */
     private var docStartViewport = false
+    /** The current page came from a data: URL (loaded with base about:blank). */
+    private var dataPage = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -108,6 +111,19 @@ class MainActivity : Activity(), ScreenUi {
         ctl.start()
         ctl.ui = this
         ctl.showing?.let { show(it) }
+        debugShow(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        debugShow(intent)
+    }
+
+    /** Debug builds only: adb shell am start -n <pkg>/.android.MainActivity --es debugShow <url> */
+    private fun debugShow(i: Intent?) {
+        if (!BuildConfig.DEBUG) return
+        val u = i?.getStringExtra("debugShow") ?: return
+        show(BoxMsg.Show(SCREEN_ID, u, "native-url", "debug"))
     }
 
     override fun onResume() {
@@ -151,7 +167,8 @@ class MainActivity : Activity(), ScreenUi {
     override fun onBoxMessage(m: BoxMsg) {
         when (m) {
             is BoxMsg.Show -> if (m.screen == SCREEN_ID) {
-                if (m.kind != "native-url") {
+                // native-url; the box also labels idle pages kind "idle" (a URL to open all the same).
+                if (m.kind == "hls") {
                     ctl.send(ClientMsg.state(SCREEN_ID, m.url, "error", "this app can't play ${m.kind}"))
                 } else {
                     show(m)
@@ -167,7 +184,7 @@ class MainActivity : Activity(), ScreenUi {
 
     private fun show(m: BoxMsg.Show) {
         val scheme = Uri.parse(m.url).scheme?.lowercase()
-        if (scheme != "http" && scheme != "https") {
+        if (scheme != "http" && scheme != "https" && scheme != "data") {
             setState("error", "the box sent a non-web URL")
             return
         }
@@ -183,6 +200,7 @@ class MainActivity : Activity(), ScreenUi {
         title = null
         failed = false
         handler.removeCallbacks(retry)
+        dataPage = false
         web?.loadUrl("about:blank")
         renderStatus()
         setState("off")
@@ -199,8 +217,18 @@ class MainActivity : Activity(), ScreenUi {
         val w = web ?: createWeb()
         renderStatus()
         setState("loading")
-        w.loadUrl(u)
+        val data = if (u.startsWith("data:", ignoreCase = true)) DataUrl.parse(u) else null
+        dataPage = data != null
+        if (data != null) {
+            // The box's idle page is a data: URL; long ones are unreliable through loadUrl.
+            w.loadDataWithBaseURL(null, data.text, data.mime, "utf-8", null)
+        } else {
+            w.loadUrl(u)
+        }
     }
+
+    /** about:blank is our own "off" page, unless a data: page was loaded (it has that URL too). */
+    private fun ours(pageUrl: String?) = pageUrl == "about:blank" && !dataPage
 
     private fun failed(why: String, retryMs: Long = 10_000) {
         Log.w(TAG, "page failed: $why")
@@ -304,17 +332,18 @@ class MainActivity : Activity(), ScreenUi {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = false
 
             override fun onPageCommitVisible(view: WebView, pageUrl: String?) {
-                if (!docStartViewport && pageUrl != "about:blank") view.evaluateJavascript(viewportJs(), null)
+                if (!docStartViewport && !ours(pageUrl)) view.evaluateJavascript(viewportJs(), null)
             }
 
             override fun onPageStarted(view: WebView, pageUrl: String?, favicon: Bitmap?) {
-                if (url != null && !failed && pageUrl != "about:blank") setState("loading")
+                if (url != null && !failed && !ours(pageUrl)) setState("loading")
             }
 
             override fun onPageFinished(view: WebView, pageUrl: String?) {
-                if (pageUrl == "about:blank" || url == null || failed) return
+                if (ours(pageUrl) || url == null || failed) return
                 if (!docStartViewport) view.evaluateJavascript(viewportJs(), null)
                 view.evaluateJavascript(HIDE_CURSOR_JS, null)
+                view.evaluateJavascript(METRICS_JS) { Log.i(TAG, "page metrics: $it") }
                 setState("playing")
             }
 
@@ -363,8 +392,8 @@ class MainActivity : Activity(), ScreenUi {
         val landscapeWidthPx = maxOf(m.widthPixels, m.heightPixels)
         val scale = (landscapeWidthPx / m.density) / CSS_WIDTH
         val s = String.format(java.util.Locale.US, "%.4f", scale)
-        val content = "width=, initial-scale=, minimum-scale=, maximum-scale=, user-scalable=no"
-        return """(function(){var C='';function fix(){var r=document.documentElement;if(!r)return;""" +
+        val content = "width=$CSS_WIDTH, initial-scale=$s, minimum-scale=$s, maximum-scale=$s, user-scalable=no"
+        return """(function(){var C='$content';function fix(){var r=document.documentElement;if(!r)return;""" +
             """var ms=document.querySelectorAll('meta[name=viewport]');if(!ms.length){var m=document.createElement('meta');m.name='viewport';""" +
             """(document.head||r).appendChild(m);ms=[m];}for(var i=0;i<ms.length;i++)if(ms[i].content!==C)ms[i].content=C;}""" +
             """fix();new MutationObserver(fix).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();"""
@@ -626,6 +655,10 @@ class MainActivity : Activity(), ScreenUi {
         const val AMBER = 0xFFF5A82B.toInt()
         const val MAX_PREVIEW_B64 = 270_000 // ≈200 KB of JPEG
         const val CSS_WIDTH = 1920
+        const val METRICS_JS =
+            "JSON.stringify({innerWidth:innerWidth,innerHeight:innerHeight,dpr:devicePixelRatio," +
+                "scale:window.visualViewport?visualViewport.scale:null," +
+                "meta:[].map.call(document.querySelectorAll('meta[name=viewport]'),function(m){return m.content})})"
         const val HIDE_CURSOR_JS =
             "(function(){var s=document.createElement('style');s.textContent='*,*::before,*::after{cursor:none!important}';(document.head||document.documentElement).appendChild(s);})()"
     }
