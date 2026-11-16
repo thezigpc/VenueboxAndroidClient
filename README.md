@@ -21,9 +21,13 @@ Download `venuebox-<version>.apk` from [Releases](../../releases) and sideload i
 2. The TV shows a 6-digit code. On the box: **TVs page → Venuebox apps** → type the code.
 3. Done: the TV now appears on the box's TVs page like any other display.
 
-To come back by itself after a power cut, the app needs **Display over other apps**: use the
-button in its settings panel, or
-`adb shell appops set com.bargames.venuebox SYSTEM_ALERT_WINDOW allow`.
+To come back by itself after a power cut, the app needs **Display over other apps**. The settings
+panel shows "Start on the TV at boot: needs 'Display over other apps' → Grant" until it has it.
+If the TV has no settings page for that permission, grant it from a computer:
+
+```
+adb shell appops set com.bargames.venuebox SYSTEM_ALERT_WINDOW allow
+```
 
 ## Build
 

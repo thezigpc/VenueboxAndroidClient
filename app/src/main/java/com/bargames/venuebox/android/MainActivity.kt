@@ -43,6 +43,8 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.bargames.venuebox.BuildConfig
 import com.bargames.venuebox.client.ClientStatus
 import com.bargames.venuebox.protocol.BoxAddress
@@ -81,6 +83,7 @@ class MainActivity : Activity(), ScreenUi {
     private lateinit var addressMsg: TextView
     private lateinit var nameInput: EditText
     private lateinit var autostartNote: TextView
+    private lateinit var grantButton: Button
     private lateinit var firstButton: Button
 
     /** The URL the box asked for; null → off. */
@@ -93,6 +96,8 @@ class MainActivity : Activity(), ScreenUi {
     private val retry = Runnable { if (url != null) load() }
     private val hideIdentify = Runnable { identifyView.visibility = View.GONE }
     private var panelShownForNoBox = false
+    /** The 1920-px viewport is injected at document start (else after load, see [viewportJs]). */
+    private var docStartViewport = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -281,6 +286,14 @@ class MainActivity : Activity(), ScreenUi {
         w.settings.domStorageEnabled = true
         w.settings.mediaPlaybackRequiresUserGesture = false
         w.settings.setSupportZoom(false)
+        // TV pages are laid out at 1920x1080 CSS px everywhere (desktop client, AirPlay/Roku
+        // Chromium), then scaled to the panel: a 1080p xhdpi TV would otherwise give 960x540.
+        w.settings.useWideViewPort = true
+        w.settings.loadWithOverviewMode = true
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            WebViewCompat.addDocumentStartJavaScript(w, viewportJs(), setOf("*"))
+            docStartViewport = true
+        }
         w.setBackgroundColor(Color.BLACK)
         // Display only: the D-pad stays with the app (BACK/MENU open the settings panel).
         w.isFocusable = false
@@ -290,12 +303,17 @@ class MainActivity : Activity(), ScreenUi {
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = false
 
+            override fun onPageCommitVisible(view: WebView, pageUrl: String?) {
+                if (!docStartViewport && pageUrl != "about:blank") view.evaluateJavascript(viewportJs(), null)
+            }
+
             override fun onPageStarted(view: WebView, pageUrl: String?, favicon: Bitmap?) {
                 if (url != null && !failed && pageUrl != "about:blank") setState("loading")
             }
 
             override fun onPageFinished(view: WebView, pageUrl: String?) {
                 if (pageUrl == "about:blank" || url == null || failed) return
+                if (!docStartViewport) view.evaluateJavascript(viewportJs(), null)
                 view.evaluateJavascript(HIDE_CURSOR_JS, null)
                 setState("playing")
             }
@@ -332,6 +350,24 @@ class MainActivity : Activity(), ScreenUi {
         webHolder.addView(w, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         web = w
         return w
+    }
+
+    /**
+     * Pins every page's viewport to 1920 CSS px wide, scaled to fit the panel: a 1080p TV at
+     * density 2 gets scale 0.5 (1 CSS px = 1 pixel), a 4K TV at density 4 renders 1920 CSS px
+     * at device scale 2. Also rewrites viewport tags the page adds later.
+     */
+    @Suppress("DEPRECATION")
+    private fun viewportJs(): String {
+        val m = android.util.DisplayMetrics().also { windowManager.defaultDisplay.getRealMetrics(it) }
+        val landscapeWidthPx = maxOf(m.widthPixels, m.heightPixels)
+        val scale = (landscapeWidthPx / m.density) / CSS_WIDTH
+        val s = String.format(java.util.Locale.US, "%.4f", scale)
+        val content = "width=, initial-scale=, minimum-scale=, maximum-scale=, user-scalable=no"
+        return """(function(){var C='';function fix(){var r=document.documentElement;if(!r)return;""" +
+            """var ms=document.querySelectorAll('meta[name=viewport]');if(!ms.length){var m=document.createElement('meta');m.name='viewport';""" +
+            """(document.head||r).appendChild(m);ms=[m];}for(var i=0;i<ms.length;i++)if(ms[i].content!==C)ms[i].content=C;}""" +
+            """fix();new MutationObserver(fix).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();"""
     }
 
     // ---------------------------------------------------------------- status page
@@ -425,7 +461,15 @@ class MainActivity : Activity(), ScreenUi {
         if (addressInput.text.isEmpty()) ctl.config.box?.let { addressInput.setText(it.removePrefix("http://")) }
         nameInput.hint = ctl.defaultName()
         if (nameInput.text.isEmpty()) ctl.config.name?.let { nameInput.setText(it) }
-        autostartNote.visibility = if (Settings.canDrawOverlays(this)) View.GONE else View.VISIBLE
+        val canStart = Settings.canDrawOverlays(this)
+        autostartNote.text = if (canStart) {
+            "Start on the TV at boot: on."
+        } else {
+            "Start on the TV at boot: needs “Display over other apps” → Grant.\n" +
+                "(Or from a computer: adb shell appops set $packageName SYSTEM_ALERT_WINDOW allow)"
+        }
+        autostartNote.setTextColor(if (canStart) 0xFFB8BCC6.toInt() else Color.WHITE)
+        grantButton.visibility = if (canStart) View.GONE else View.VISIBLE
     }
 
     // ---------------------------------------------------------------- UI building
@@ -515,18 +559,16 @@ class MainActivity : Activity(), ScreenUi {
         col.addView(button("Save name") { ctl.setName(nameInput.text.toString()); addressMsg.text = "Name saved." })
 
         col.addView(heading("Start after a power cut"))
-        autostartNote = note(
-            "Android needs “Display over other apps” for Venuebox so it can open by itself at power-on. " +
-                "If the button doesn't work on this TV: adb shell appops set ${packageName} SYSTEM_ALERT_WINDOW allow",
-        )
+        autostartNote = note("")
         col.addView(autostartNote)
-        col.addView(button("Allow starting at power-on") {
+        grantButton = button("Grant") {
             try {
                 startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             } catch (_: ActivityNotFoundException) {
-                addressMsg.text = "This TV has no settings page for it: use the adb command above."
+                addressMsg.text = "This TV has no settings page for it: adb shell appops set $packageName SYSTEM_ALERT_WINDOW allow"
             }
-        })
+        }
+        col.addView(grantButton)
 
         col.addView(heading("Pairing"))
         col.addView(button("Unpair (show a new code)") { ctl.unpair(); addressMsg.text = "Unpaired." })
@@ -583,6 +625,7 @@ class MainActivity : Activity(), ScreenUi {
     private companion object {
         const val AMBER = 0xFFF5A82B.toInt()
         const val MAX_PREVIEW_B64 = 270_000 // ≈200 KB of JPEG
+        const val CSS_WIDTH = 1920
         const val HIDE_CURSOR_JS =
             "(function(){var s=document.createElement('style');s.textContent='*,*::before,*::after{cursor:none!important}';(document.head||document.documentElement).appendChild(s);})()"
     }

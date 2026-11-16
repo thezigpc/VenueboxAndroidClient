@@ -30,6 +30,9 @@ In short: the box is at `http://<box LAN IP>:7210`.
 
 - Kotlin, one Activity, plain Views (no Compose), built for TV: Leanback launcher intent,
   banner, D-pad navigable. BACK / MENU / OK open the settings panel; BACK closes it.
+- TV pages are laid out at **1920x1080 CSS px** and scaled to the panel, like every other client
+  (a document-start script pins the viewport meta to width=1920 at the panel's scale; a 4K TV
+  renders 1920 CSS px at device scale 2). Without it a 1080p xhdpi TV would give 960x540.
 - A full-screen WebView for `show`: JavaScript and DOM storage on, media autoplay without a
   gesture, screen kept on, no pointer, not focusable (the D-pad stays with the app).
 - `identify` flashes the screen's name. `state` messages on every change. `preview` answers
