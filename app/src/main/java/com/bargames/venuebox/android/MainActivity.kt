@@ -167,7 +167,8 @@ class MainActivity : Activity(), ScreenUi {
     override fun onBoxMessage(m: BoxMsg) {
         when (m) {
             is BoxMsg.Show -> if (m.screen == SCREEN_ID) {
-                // native-url; the box also labels idle pages kind "idle" (a URL to open all the same).
+                // The box sends native-url (idle pages too, usually as data: URLs). Any other kind
+                // that's a URL is opened as well; only hls needs a player this app doesn't have.
                 if (m.kind == "hls") {
                     ctl.send(ClientMsg.state(SCREEN_ID, m.url, "error", "this app can't play ${m.kind}"))
                 } else {
