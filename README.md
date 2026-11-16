@@ -1,0 +1,36 @@
+# Venuebox for Android TV
+
+Turns an Android TV / Google TV (a TV or a streaming stick) into a screen for a Bar Games
+box. Paired once, it shows the game TV pages the box sends, rendered on the TV itself: no
+encoding on the box and no delay.
+
+## Install
+
+Download `venuebox-<version>.apk` from [Releases](../../releases) and sideload it:
+
+1. On the TV: Settings → Device Preferences → About → press Build 7 times, then
+   Developer options → turn on USB / network debugging.
+2. From a computer on the same network: `adb connect <tv address>` then
+   `adb install -r venuebox-<version>.apk`.
+
+## Set up
+
+1. Open **Venuebox**. It looks for the box on the network; if it finds exactly one it uses it.
+   Otherwise press **BACK** (or MENU/OK) for settings: choose a box, or type its address
+   (e.g. `192.168.1.20`; port 7210 is the default).
+2. The TV shows a 6-digit code. On the box: **TVs page → Venuebox apps** → type the code.
+3. Done: the TV now appears on the box's TVs page like any other display.
+
+To come back by itself after a power cut, the app needs **Display over other apps**: use the
+button in its settings panel, or
+`adb shell appops set com.bargames.venuebox SYSTEM_ALERT_WINDOW allow`.
+
+## Build
+
+JDK 17 and the Android SDK (platform 35, build-tools 35.0.0):
+
+```
+gradlew assembleDebug testDebugUnitTest
+```
+
+Protocol: [NATIVE-CLIENTS.md](https://github.com/thezigpc/venueplay/blob/main/docs/NATIVE-CLIENTS.md).

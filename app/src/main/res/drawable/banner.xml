@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android TV launcher banner (320x180 dp): dark card, amber TV mark and bar. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path
+        android:fillColor="#111318"
+        android:pathData="M0,0h320v180h-320z" />
+    <path
+        android:fillColor="#F5A82B"
+        android:pathData="M112,40h96a8,8 0,0 1,8 8v60a8,8 0,0 1,-8 8h-96a8,8 0,0 1,-8 -8v-60a8,8 0,0 1,8 -8zM140,124h40v8h-40z" />
+    <path
+        android:fillColor="#111318"
+        android:pathData="M148,60l30,18l-30,18z" />
+    <path
+        android:fillColor="#F5A82B"
+        android:pathData="M60,150h200v6h-200z" />
+</vector>

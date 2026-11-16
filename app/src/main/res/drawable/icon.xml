@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Amber rounded square with a TV outline. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#F5A82B"
+        android:pathData="M8,2h32a6,6 0,0 1,6 6v32a6,6 0,0 1,-6 6h-32a6,6 0,0 1,-6 -6v-32a6,6 0,0 1,6 -6z" />
+    <path
+        android:fillColor="#111318"
+        android:pathData="M10,13h28a2,2 0,0 1,2 2v16a2,2 0,0 1,-2 2h-28a2,2 0,0 1,-2 -2v-16a2,2 0,0 1,2 -2zM18,36h12v3h-12z" />
+    <path
+        android:fillColor="#F5A82B"
+        android:pathData="M21,18l8,5l-8,5z" />
+</vector>
