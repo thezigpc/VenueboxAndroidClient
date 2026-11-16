@@ -4,6 +4,12 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.res.Configuration
+import android.hardware.display.DisplayManager
+import android.view.Display
+import androidx.webkit.ScriptHandler
+import com.bargames.venuebox.client.Mode
+import com.bargames.venuebox.client.bestMode
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -99,6 +105,8 @@ class MainActivity : Activity(), ScreenUi {
     private var panelShownForNoBox = false
     /** The 1920-px viewport is injected at document start (else after load, see [viewportJs]). */
     private var docStartViewport = false
+    private var viewportScript: ScriptHandler? = null
+    private var viewportScriptJs: String? = null
     /** The current page came from a data: URL (loaded with base about:blank). */
     private var dataPage = false
 
@@ -108,6 +116,11 @@ class MainActivity : Activity(), ScreenUi {
         buildUi()
         setContentView(root)
         immersive()
+        root.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB ->
+            if (r - l != oldR - oldL || b - t != oldB - oldT) refitViewport()
+        }
+        pickDisplayMode()
+        (getSystemService(DISPLAY_SERVICE) as DisplayManager).registerDisplayListener(displayListener, handler)
         ctl.start()
         ctl.ui = this
         ctl.showing?.let { show(it) }
@@ -132,7 +145,64 @@ class MainActivity : Activity(), ScreenUi {
         refreshPanel()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        refitViewport()
+    }
+
+    // ---------------------------------------------------------------- display
+
+    /** The TV switched modes (e.g. to 4K after [pickDisplayMode]): rescale and tell the box. */
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId != Display.DEFAULT_DISPLAY) return
+            val s = ctl.screen()
+            if (s.w == reportedW && s.h == reportedH) return
+            reportedW = s.w
+            reportedH = s.h
+            Log.i(TAG, "display now ${s.w}x${s.h}@${s.hz}")
+            ctl.send(ClientMsg.screens(listOf(s)))
+            refitViewport()
+        }
+    }
+    private var reportedW = 0
+    private var reportedH = 0
+
+    /**
+     * Asks for the TV's sharpest mode (4K on a 4K TV, at the same refresh rate; see [bestMode]).
+     * Pages stay 1920x1080 CSS px, scaled to fit, but render with the panel's pixels where the
+     * device draws apps at that size. Only a hint: Android or the device may keep the mode.
+     */
+    @Suppress("DEPRECATION")
+    private fun pickDisplayMode() {
+        val d = windowManager.defaultDisplay ?: return
+        fun Display.Mode.m() = Mode(modeId, physicalWidth, physicalHeight, refreshRate)
+        val cur = d.mode
+        reportedW = ctl.screen().w
+        reportedH = ctl.screen().h
+        Log.i(TAG, "display ${cur.physicalWidth}x${cur.physicalHeight}@${cur.refreshRate}; modes " +
+            d.supportedModes.joinToString { "${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}" })
+        val best = bestMode(d.supportedModes.map { it.m() }, cur.m()) ?: return
+        Log.i(TAG, "asking for ${best.w}x${best.h}@${best.hz}")
+        window.attributes = window.attributes.also { it.preferredDisplayModeId = best.id }
+    }
+
+    /** Re-pins the viewport when the surface's size or density changed (live, no reload). */
+    private fun refitViewport() {
+        val w = web ?: return
+        val js = viewportJs()
+        if (js == viewportScriptJs) return
+        Log.i(TAG, "viewport refit")
+        viewportScriptJs = js
+        viewportScript?.remove()
+        if (docStartViewport) viewportScript = WebViewCompat.addDocumentStartJavaScript(w, js, setOf("*"))
+        if (url != null && !failed) w.evaluateJavascript(js, null)
+    }
+
     override fun onDestroy() {
+        (getSystemService(DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(displayListener)
         if (ctl.ui === this) ctl.ui = null
         handler.removeCallbacksAndMessages(null)
         scope.cancel()
@@ -320,7 +390,8 @@ class MainActivity : Activity(), ScreenUi {
         w.settings.useWideViewPort = true
         w.settings.loadWithOverviewMode = true
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-            WebViewCompat.addDocumentStartJavaScript(w, viewportJs(), setOf("*"))
+            viewportScriptJs = viewportJs()
+            viewportScript = WebViewCompat.addDocumentStartJavaScript(w, viewportScriptJs!!, setOf("*"))
             docStartViewport = true
         }
         w.setBackgroundColor(Color.BLACK)
@@ -389,15 +460,21 @@ class MainActivity : Activity(), ScreenUi {
      */
     @Suppress("DEPRECATION")
     private fun viewportJs(): String {
-        val m = android.util.DisplayMetrics().also { windowManager.defaultDisplay.getRealMetrics(it) }
-        val landscapeWidthPx = maxOf(m.widthPixels, m.heightPixels)
-        val scale = (landscapeWidthPx / m.density) / CSS_WIDTH
+        // The page's real surface once laid out (it re-fits on every size change): the display
+        // metrics can report the panel's pixels with the surface's density when the two differ
+        // (a 4K surface measured as 1920), which would halve the scale.
+        val wPx = maxOf(root.width, root.height).takeIf { it > 0 }
+            ?: android.util.DisplayMetrics().also { windowManager.defaultDisplay.getRealMetrics(it) }.let { maxOf(it.widthPixels, it.heightPixels) }
+        val scale = (wPx / resources.displayMetrics.density) / CSS_WIDTH
         val s = String.format(java.util.Locale.US, "%.4f", scale)
         val content = "width=$CSS_WIDTH, initial-scale=$s, minimum-scale=$s, maximum-scale=$s, user-scalable=no"
-        return """(function(){var C='$content';function fix(){var r=document.documentElement;if(!r)return;""" +
+        // The target lives in window.__vbVp so running the script again (a refit) updates the one
+        // observer instead of adding a second one that would fight the first over the tag.
+        return """(function(){window.__vbVp='$content';if(window.__vbFix){window.__vbFix();return;}""" +
+            """function fix(){var C=window.__vbVp,r=document.documentElement;if(!r)return;""" +
             """var ms=document.querySelectorAll('meta[name=viewport]');if(!ms.length){var m=document.createElement('meta');m.name='viewport';""" +
             """(document.head||r).appendChild(m);ms=[m];}for(var i=0;i<ms.length;i++)if(ms[i].content!==C)ms[i].content=C;}""" +
-            """fix();new MutationObserver(fix).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();"""
+            """window.__vbFix=fix;fix();new MutationObserver(fix).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();"""
     }
 
     // ---------------------------------------------------------------- status page

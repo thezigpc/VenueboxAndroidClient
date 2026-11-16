@@ -257,8 +257,13 @@ class Controller(private val app: Application) {
         val wm = app.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val d = wm.defaultDisplay
         val m = DisplayMetrics().also { d.getRealMetrics(it) }
-        val w = maxOf(1, m.widthPixels)
-        val h = maxOf(1, m.heightPixels)
+        // The panel's real size: a stick may draw apps at 1080p while sending 4K to the TV, so
+        // the display mode (4K) can be larger than the app's surface (1080p).
+        var pw = d.mode.physicalWidth
+        var ph = d.mode.physicalHeight
+        if ((pw > ph) != (m.widthPixels > m.heightPixels)) pw = ph.also { ph = pw }
+        val w = maxOf(1, m.widthPixels, pw)
+        val h = maxOf(1, m.heightPixels, ph)
         val hz = Math.round(d.refreshRate).takeIf { it in 1..500 }
         return Screen(SCREEN_ID, defaultName(), w, h, hz)
     }

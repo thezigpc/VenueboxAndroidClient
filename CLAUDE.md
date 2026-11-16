@@ -33,6 +33,12 @@ In short: the box is at `http://<box LAN IP>:7210`.
 - TV pages are laid out at **1920x1080 CSS px** and scaled to the panel, like every other client
   (a document-start script pins the viewport meta to width=1920 at the panel's scale; a 4K TV
   renders 1920 CSS px at device scale 2). Without it a 1080p xhdpi TV would give 960x540.
+  The scale comes from the WebView's real size and is refit live when it changes.
+- Highest fidelity: on start the app asks for the TV's sharpest display mode (`bestMode`: most
+  pixels, same shape, never a lower refresh rate). Pages stay 1920 CSS px, scaled to fit; they
+  get 4K pixels only where the device draws apps at 4K (many sticks draw apps at 1080p and send
+  4K to the TV). `hello`'s screen `w`/`h` is the panel's real size (the display mode), and a
+  mode change is sent as `screens`. The emulator has one mode, so test this on a real 4K TV.
 - A full-screen WebView for `show`: JavaScript and DOM storage on, media autoplay without a
   gesture, screen kept on, no pointer, not focusable (the D-pad stays with the app).
 - `identify` flashes the screen's name. `state` messages on every change. `preview` answers
