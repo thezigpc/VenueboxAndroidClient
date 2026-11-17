@@ -51,6 +51,13 @@ In short: the box is at `http://<box LAN IP>:7210`.
 - Locked to landscape (`sensorLandscape`). Tablets/phones get an opt-in home-screen mode
   (`HomeMode`): the manifest's `HomeAlias` (category HOME) is disabled until staff turn it on in
   the settings panel, then Android's home-app setting opens. Hidden on TVs.
+- Touch mode (settings panel, off by default; tablets and touch TVs as kiosks): the WebView
+  takes taps and focus, `window.__BARGAMES_KEYBOARD__ = true` is injected at document start
+  (GameKit 0.10's `<OnScreenKeyboard />`; onPageStarted fallback), focusing an
+  `inputmode="none"` field also hides Android's keyboard (`VenueboxTouch.hideKeyboard()`),
+  and taps can only navigate to the box's host or the shown page's host. Off: nothing is
+  injected. Pop-ups (window.open, target=_blank) are always dropped; zoom is always off.
+  Test a page's keyboard with `?bg_keyboard=1`.
 - Address fallback: the settings panel always offers "type the box address" (host or
   host:port). The emulator sits behind NAT and can't see mDNS; some venue networks block it.
 - Sideloaded APK, no Play Store. Signed with the debug key for now: an APK built on another

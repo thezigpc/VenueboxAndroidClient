@@ -7,6 +7,8 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import android.view.Display
+import android.view.inputmethod.InputMethodManager
+import android.webkit.JavascriptInterface
 import androidx.webkit.ScriptHandler
 import com.bargames.venuebox.client.Mode
 import com.bargames.venuebox.client.bestMode
@@ -112,6 +114,11 @@ class MainActivity : Activity(), ScreenUi {
     private var docStartViewport = false
     private var viewportScript: ScriptHandler? = null
     private var viewportScriptJs: String? = null
+    /** The current WebView was built in touch mode (keyboard flag, taps, box-only links). */
+    private var touchWeb = false
+    private var docStartTouch = false
+    private lateinit var touchNote: TextView
+    private lateinit var touchToggle: Button
     /** The current page came from a data: URL (loaded with base about:blank). */
     private var dataPage = false
 
@@ -303,6 +310,38 @@ class MainActivity : Activity(), ScreenUi {
         }
     }
 
+    /** Touch mode's one page hook: put Android's keyboard away (see [TOUCH_JS]). */
+    private inner class TouchBridge {
+        @JavascriptInterface
+        fun hideKeyboard() {
+            handler.post {
+                val w = web ?: return@post
+                (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(w.windowToken, 0)
+            }
+        }
+    }
+
+    /** The box itself (any port) or the host of the page it sent. */
+    private fun onBoxPages(target: Uri): Boolean {
+        val host = target.host?.lowercase() ?: return false
+        val box = ctl.config.box?.let { BoxAddress.host(it) }?.lowercase()?.trim('[', ']')
+        val shown = url?.let { Uri.parse(it).host }?.lowercase()
+        return host.trim('[', ']') == box || host == shown
+    }
+
+    /** Touch mode changed: a fresh WebView, so the keyboard flag is there (or not) from the start. */
+    private fun rebuildWeb() {
+        web?.let {
+            webHolder.removeView(it)
+            it.destroy()
+        }
+        web = null
+        viewportScript = null
+        viewportScriptJs = null
+        createWeb()
+        if (url != null) load()
+    }
+
     /** about:blank is our own "off" page, unless a data: page was loaded (it has that URL too). */
     private fun ours(pageUrl: String?) = pageUrl == "about:blank" && !dataPage
 
@@ -394,25 +433,51 @@ class MainActivity : Activity(), ScreenUi {
         // Chromium), then scaled to the panel: a 1080p xhdpi TV would otherwise give 960x540.
         w.settings.useWideViewPort = true
         w.settings.loadWithOverviewMode = true
+        // No pinch zoom (the viewport also pins min = max scale) and no pop-up windows:
+        // multiple windows on + onCreateWindow → false drops window.open / target=_blank.
+        w.settings.builtInZoomControls = false
+        w.settings.displayZoomControls = false
+        w.settings.setSupportMultipleWindows(true)
+        w.settings.javaScriptCanOpenWindowsAutomatically = false
+        val touch = ctl.config.touchMode
+        touchWeb = touch
+        docStartTouch = false
+        if (touch) w.addJavascriptInterface(TouchBridge(), "VenueboxTouch")
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             viewportScriptJs = viewportJs()
             viewportScript = WebViewCompat.addDocumentStartJavaScript(w, viewportScriptJs!!, setOf("*"))
             docStartViewport = true
+            // Touch mode: GameKit's <OnScreenKeyboard /> reads this before the page's scripts run.
+            if (touch) {
+                WebViewCompat.addDocumentStartJavaScript(w, TOUCH_JS, setOf("*"))
+                docStartTouch = true
+            }
         }
         w.setBackgroundColor(Color.BLACK)
         // Display only: the D-pad stays with the app (BACK/MENU open the settings panel).
-        w.isFocusable = false
-        w.isFocusableInTouchMode = false
+        // Touch mode: the page takes taps and focus (its fields use GameKit's keyboard).
+        w.isFocusable = touch
+        w.isFocusableInTouchMode = touch
         w.isLongClickable = false
         w.setOnLongClickListener { true }
         w.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = false
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                val target = request.url
+                // intent:, tel:, market: … never leave the app.
+                if (target.scheme?.lowercase() !in WEB_SCHEMES) return true
+                if (!touchWeb || !request.isForMainFrame || request.isRedirect) return false
+                // Touch mode: a tap can only go to the box's pages, not other sites.
+                if (onBoxPages(target)) return false
+                Log.i(TAG, "touch mode: blocked a link to ${target.host}")
+                return true
+            }
 
             override fun onPageCommitVisible(view: WebView, pageUrl: String?) {
                 if (!docStartViewport && !ours(pageUrl)) view.evaluateJavascript(viewportJs(), null)
             }
 
             override fun onPageStarted(view: WebView, pageUrl: String?, favicon: Bitmap?) {
+                if (touchWeb && !docStartTouch && !ours(pageUrl)) view.evaluateJavascript(TOUCH_JS, null)
                 if (url != null && !failed && !ours(pageUrl)) setState("loading")
             }
 
@@ -449,6 +514,9 @@ class MainActivity : Activity(), ScreenUi {
                 if (BuildConfig.DEBUG) Log.d(TAG, "page: ${m.message()}")
                 return true
             }
+
+            // Pop-ups (window.open, target=_blank) are dropped.
+            override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?) = false
 
             // No grey "play" poster on videos before they start.
             override fun getDefaultVideoPoster(): Bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
@@ -525,8 +593,9 @@ class MainActivity : Activity(), ScreenUi {
             if (event.action == KeyEvent.ACTION_UP) showPanel(panel.visibility != View.VISIBLE)
             return true
         }
-        // Panel closed: OK / centre also opens it (remotes without a menu key).
-        if (panel.visibility != View.VISIBLE && (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER)) {
+        // Panel closed: OK / centre also opens it (remotes without a menu key). Not in touch mode,
+        // where Enter belongs to the page's fields.
+        if (panel.visibility != View.VISIBLE && !touchWeb && (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER)) {
             if (event.action == KeyEvent.ACTION_UP) showPanel(true)
             return true
         }
@@ -584,6 +653,14 @@ class MainActivity : Activity(), ScreenUi {
         }
         autostartNote.setTextColor(if (canStart) 0xFFB8BCC6.toInt() else Color.WHITE)
         grantButton.visibility = if (canStart) View.GONE else View.VISIBLE
+
+        touchNote.text = if (ctl.config.touchMode) {
+            "On: games show their own big on-screen keyboard; taps stay on the box's pages."
+        } else {
+            "Off. For tablets and touch TVs used as kiosks: games show a big on-screen keyboard " +
+                "instead of Android's, no pinch zoom, and taps can't leave the box's pages."
+        }
+        touchToggle.text = if (ctl.config.touchMode) "Turn off" else "Turn on"
 
         // Google TV and most TV sticks don't let another app be the home screen: tablets/phones only.
         homeSection.visibility = if (ctl.isTv()) View.GONE else View.VISIBLE
@@ -695,6 +772,17 @@ class MainActivity : Activity(), ScreenUi {
         }
         col.addView(grantButton)
 
+        col.addView(heading("Touch mode"))
+        touchNote = note("")
+        col.addView(touchNote)
+        touchToggle = button("Turn on") {
+            ctl.config.touchMode = !ctl.config.touchMode
+            Log.i(TAG, "touch mode ${if (ctl.config.touchMode) "on" else "off"}")
+            rebuildWeb()
+            refreshPanel()
+        }
+        col.addView(touchToggle)
+
         homeSection = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         homeSection.addView(heading("Home screen (dedicated tablets)"))
         homeNote = note("")
@@ -767,9 +855,18 @@ class MainActivity : Activity(), ScreenUi {
         const val AMBER = 0xFFF5A82B.toInt()
         const val MAX_PREVIEW_B64 = 270_000 // ≈200 KB of JPEG
         const val CSS_WIDTH = 1920
+        /**
+         * GameKit 0.10's <OnScreenKeyboard /> shows its big keys when the flag is set. Its fields
+         * are inputmode=none; focusing one also puts away Android's keyboard if a plain field had
+         * brought it up (Chromium keeps it showing otherwise).
+         */
+        const val TOUCH_JS = "window.__BARGAMES_KEYBOARD__ = true;" +
+            "document.addEventListener('focusin',function(e){var t=e.target;" +
+            "if(t&&t.inputMode==='none'&&window.VenueboxTouch)VenueboxTouch.hideKeyboard();},true);"
+        val WEB_SCHEMES = setOf("http", "https", "data", "about", "javascript")
         const val METRICS_JS =
             "JSON.stringify({innerWidth:innerWidth,innerHeight:innerHeight,dpr:devicePixelRatio," +
-                "scale:window.visualViewport?visualViewport.scale:null," +
+                "scale:window.visualViewport?visualViewport.scale:null,keyboardFlag:window.__BARGAMES_KEYBOARD__===true," +
                 "meta:[].map.call(document.querySelectorAll('meta[name=viewport]'),function(m){return m.content})})"
         const val HIDE_CURSOR_JS =
             "(function(){var s=document.createElement('style');s.textContent='*,*::before,*::after{cursor:none!important}';(document.head||document.documentElement).appendChild(s);})()"

@@ -34,6 +34,11 @@ class Config(context: Context) {
     var name: String?
         get() = prefs.getString("name", null)
         set(v) = prefs.edit().putString("name", v).apply()
+
+    /** Touch mode (kiosk tablets, touch TVs): pages get the GameKit on-screen keyboard flag. */
+    var touchMode: Boolean
+        get() = prefs.getBoolean("touchMode", false)
+        set(v) = prefs.edit().putBoolean("touchMode", v).apply()
 }
 
 /**

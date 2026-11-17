@@ -41,6 +41,9 @@ settings panel with the back gesture or button.
   **Turn on**, then pick Venuebox as the home app (Always). It then comes back after every reboot
   and on the home button, with no other permission. **Turn off** gives the normal home screen
   back. Not offered on TVs: Google TV doesn't allow another home app.
+- **Touch mode**, for tablets and touch TVs that players use directly: settings panel → Touch mode
+  → **Turn on**. Games show their own big on-screen keyboard instead of Android's, pages can't
+  be zoomed, and taps can't leave the box's pages. Off by default.
 
 ## Build
 
