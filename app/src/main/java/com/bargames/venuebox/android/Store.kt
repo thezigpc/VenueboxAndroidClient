@@ -35,10 +35,15 @@ class Config(context: Context) {
         get() = prefs.getString("name", null)
         set(v) = prefs.edit().putString("name", v).apply()
 
-    /** Touch mode (kiosk tablets, touch TVs): pages get the GameKit on-screen keyboard flag. */
+    /** Touch mode (kiosk tablets, touch TVs): taps, box pages only, GameKit's shared-screen flag. */
     var touchMode: Boolean
         get() = prefs.getBoolean("touchMode", false)
         set(v) = prefs.edit().putBoolean("touchMode", v).apply()
+
+    /** In touch mode, GameKit's big on-screen keyboard instead of Android's (opt-in). */
+    var bigKeyboard: Boolean
+        get() = prefs.getBoolean("bigKeyboard", false)
+        set(v) = prefs.edit().putBoolean("bigKeyboard", v).apply()
 }
 
 /**

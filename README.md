@@ -42,8 +42,10 @@ settings panel with the back gesture or button.
   and on the home button, with no other permission. **Turn off** gives the normal home screen
   back. Not offered on TVs: Google TV doesn't allow another home app.
 - **Touch mode**, for tablets and touch TVs that players use directly: settings panel → Touch mode
-  → **Turn on**. Games show their own big on-screen keyboard instead of Android's, pages can't
-  be zoomed, and taps can't leave the box's pages. Off by default.
+  → **Turn on**. Pages can't be zoomed, taps can't leave the box's pages, and games treat the
+  screen as shared (they forget the last person). Typing uses Android's keyboard; if this
+  device's own keyboard is awkward to tap (e.g. a TV box with a touch panel), choose **Use the
+  big on-screen keyboard** to get the games' own big keys instead. Both are off by default.
 
 ## Build
 

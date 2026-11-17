@@ -117,8 +117,12 @@ class MainActivity : Activity(), ScreenUi {
     /** The current WebView was built in touch mode (keyboard flag, taps, box-only links). */
     private var touchWeb = false
     private var docStartTouch = false
+    /** What touch mode injects into each page (null: touch mode off, nothing). */
+    private var touchJs: String? = null
     private lateinit var touchNote: TextView
     private lateinit var touchToggle: Button
+    private lateinit var keyboardNote: TextView
+    private lateinit var keyboardToggle: Button
     /** The current page came from a data: URL (loaded with base about:blank). */
     private var dataPage = false
 
@@ -310,7 +314,7 @@ class MainActivity : Activity(), ScreenUi {
         }
     }
 
-    /** Touch mode's one page hook: put Android's keyboard away (see [TOUCH_JS]). */
+    /** The big keyboard's one page hook: put Android's keyboard away (see [KEYBOARD_JS]). */
     private inner class TouchBridge {
         @JavascriptInterface
         fun hideKeyboard() {
@@ -440,16 +444,19 @@ class MainActivity : Activity(), ScreenUi {
         w.settings.setSupportMultipleWindows(true)
         w.settings.javaScriptCanOpenWindowsAutomatically = false
         val touch = ctl.config.touchMode
+        val bigKeyboard = touch && ctl.config.bigKeyboard
         touchWeb = touch
         docStartTouch = false
-        if (touch) w.addJavascriptInterface(TouchBridge(), "VenueboxTouch")
+        // Touch mode: GameKit reads these before the page's scripts run. Shared screen always;
+        // the big keyboard (and its IME-hiding bridge) only when staff chose it.
+        touchJs = if (touch) SHARED_SCREEN_JS + (if (bigKeyboard) KEYBOARD_JS else "") else null
+        if (bigKeyboard) w.addJavascriptInterface(TouchBridge(), "VenueboxTouch")
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             viewportScriptJs = viewportJs()
             viewportScript = WebViewCompat.addDocumentStartJavaScript(w, viewportScriptJs!!, setOf("*"))
             docStartViewport = true
-            // Touch mode: GameKit's <OnScreenKeyboard /> reads this before the page's scripts run.
-            if (touch) {
-                WebViewCompat.addDocumentStartJavaScript(w, TOUCH_JS, setOf("*"))
+            touchJs?.let {
+                WebViewCompat.addDocumentStartJavaScript(w, it, setOf("*"))
                 docStartTouch = true
             }
         }
@@ -477,7 +484,7 @@ class MainActivity : Activity(), ScreenUi {
             }
 
             override fun onPageStarted(view: WebView, pageUrl: String?, favicon: Bitmap?) {
-                if (touchWeb && !docStartTouch && !ours(pageUrl)) view.evaluateJavascript(TOUCH_JS, null)
+                if (!docStartTouch && !ours(pageUrl)) touchJs?.let { view.evaluateJavascript(it, null) }
                 if (url != null && !failed && !ours(pageUrl)) setState("loading")
             }
 
@@ -654,13 +661,26 @@ class MainActivity : Activity(), ScreenUi {
         autostartNote.setTextColor(if (canStart) 0xFFB8BCC6.toInt() else Color.WHITE)
         grantButton.visibility = if (canStart) View.GONE else View.VISIBLE
 
-        touchNote.text = if (ctl.config.touchMode) {
-            "On: games show their own big on-screen keyboard; taps stay on the box's pages."
+        val touch = ctl.config.touchMode
+        touchNote.text = if (touch) {
+            "On: players tap the games here; taps stay on the box's pages, and games treat this " +
+                "as a shared screen (they forget the last person)."
         } else {
-            "Off. For tablets and touch TVs used as kiosks: games show a big on-screen keyboard " +
-                "instead of Android's, no pinch zoom, and taps can't leave the box's pages."
+            "Off. For tablets and touch TVs used as kiosks: players tap the games, no pinch zoom, " +
+                "taps can't leave the box's pages, and games forget the last person."
         }
-        touchToggle.text = if (ctl.config.touchMode) "Turn off" else "Turn on"
+        touchToggle.text = if (touch) "Turn off" else "Turn on"
+        // The big keyboard is a touch-mode option: for devices whose own keyboard is poor (a TV
+        // box with a touch panel gets the full-screen remote keyboard).
+        keyboardNote.visibility = if (touch) View.VISIBLE else View.GONE
+        keyboardToggle.visibility = keyboardNote.visibility
+        keyboardNote.text = if (ctl.config.bigKeyboard) {
+            "Typing: the games' big on-screen keyboard."
+        } else {
+            "Typing: Android's keyboard. Switch to the games' big keyboard if this device's own " +
+                "is awkward to tap (e.g. a TV box with a touch panel)."
+        }
+        keyboardToggle.text = if (ctl.config.bigKeyboard) "Use Android's keyboard" else "Use the big on-screen keyboard"
 
         // Google TV and most TV sticks don't let another app be the home screen: tablets/phones only.
         homeSection.visibility = if (ctl.isTv()) View.GONE else View.VISIBLE
@@ -782,8 +802,17 @@ class MainActivity : Activity(), ScreenUi {
             refreshPanel()
         }
         col.addView(touchToggle)
+        keyboardNote = note("")
+        col.addView(keyboardNote)
+        keyboardToggle = button("Use the big on-screen keyboard") {
+            ctl.config.bigKeyboard = !ctl.config.bigKeyboard
+            Log.i(TAG, "big keyboard ${if (ctl.config.bigKeyboard) "on" else "off"}")
+            rebuildWeb()
+            refreshPanel()
+        }
+        col.addView(keyboardToggle)
 
-        homeSection = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        homeSection =LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         homeSection.addView(heading("Home screen (dedicated tablets)"))
         homeNote = note("")
         homeSection.addView(homeNote)
@@ -855,18 +884,21 @@ class MainActivity : Activity(), ScreenUi {
         const val AMBER = 0xFFF5A82B.toInt()
         const val MAX_PREVIEW_B64 = 270_000 // ≈200 KB of JPEG
         const val CSS_WIDTH = 1920
+        /** Touch mode: "many people use this screen" (GameKit 0.10.2), so games forget the last person. */
+        const val SHARED_SCREEN_JS = "window.__BARGAMES_SHARED_SCREEN__ = true;"
         /**
-         * GameKit 0.10's <OnScreenKeyboard /> shows its big keys when the flag is set. Its fields
-         * are inputmode=none; focusing one also puts away Android's keyboard if a plain field had
-         * brought it up (Chromium keeps it showing otherwise).
+         * Touch mode + big keyboard: GameKit 0.10's <OnScreenKeyboard /> shows its big keys. Its
+         * fields are inputmode=none; focusing one also puts away Android's keyboard if a plain
+         * field had brought it up (Chromium keeps it showing otherwise).
          */
-        const val TOUCH_JS = "window.__BARGAMES_KEYBOARD__ = true;" +
+        const val KEYBOARD_JS = "window.__BARGAMES_KEYBOARD__ = true;" +
             "document.addEventListener('focusin',function(e){var t=e.target;" +
             "if(t&&t.inputMode==='none'&&window.VenueboxTouch)VenueboxTouch.hideKeyboard();},true);"
         val WEB_SCHEMES = setOf("http", "https", "data", "about", "javascript")
         const val METRICS_JS =
             "JSON.stringify({innerWidth:innerWidth,innerHeight:innerHeight,dpr:devicePixelRatio," +
                 "scale:window.visualViewport?visualViewport.scale:null,keyboardFlag:window.__BARGAMES_KEYBOARD__===true," +
+                "sharedFlag:window.__BARGAMES_SHARED_SCREEN__===true," +
                 "meta:[].map.call(document.querySelectorAll('meta[name=viewport]'),function(m){return m.content})})"
         const val HIDE_CURSOR_JS =
             "(function(){var s=document.createElement('style');s.textContent='*,*::before,*::after{cursor:none!important}';(document.head||document.documentElement).appendChild(s);})()"
