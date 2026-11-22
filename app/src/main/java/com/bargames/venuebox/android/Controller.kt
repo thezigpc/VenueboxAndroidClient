@@ -21,7 +21,10 @@ import com.bargames.venuebox.client.defaultHttp
 import com.bargames.venuebox.protocol.BoxAddress
 import com.bargames.venuebox.protocol.BoxMsg
 import com.bargames.venuebox.protocol.DeviceInfo
+import com.bargames.venuebox.protocol.ClientMsg
 import com.bargames.venuebox.protocol.Screen
+import com.bargames.venuebox.protocol.VideoCaps
+import com.bargames.venuebox.protocol.VideoState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -91,6 +94,7 @@ class Controller(private val app: Application) {
         override val token get() = this@Controller.token
         override fun device() = deviceInfo()
         override fun screens() = listOf(screen())
+        override fun video() = videoCaps
         override fun onStatus(s: ClientStatus) = main.post {
             if (s !is ClientStatus.Connected) Log.i(TAG, "status: ${redact(s)}")
             if (s is ClientStatus.Connected) {
@@ -127,6 +131,11 @@ class Controller(private val app: Application) {
             is BoxMsg.Off -> if (m.screen == SCREEN_ID) showing = null
             is BoxMsg.Error -> Log.w(TAG, "box error ${m.code}: ${m.message}")
             is BoxMsg.Unknown -> Log.i(TAG, "ignoring box message '${m.type}'")
+            is BoxMsg.Video -> if (ui == null) {
+                // Every op gets an answer, even with no screen up to play it on.
+                send(ClientMsg.videoReply(m.requestId, false, "error", "the screen isn't open", if (m.op == "status") VideoState.STOPPED else null))
+                return
+            }
             else -> {}
         }
         ui?.onBoxMessage(m)
@@ -250,7 +259,17 @@ class Controller(private val app: Application) {
         appVersion = BuildConfig.VERSION_NAME,
     )
 
-    fun isTv() = app.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+    /** What the video player plays, from this device's decoders (checked once; see [VideoPlayer.caps]). */
+    val videoCaps: VideoCaps? by lazy {
+        try {
+            VideoPlayer.caps(app).also { Log.i(TAG, "video: ${it.toJson()}") }
+        } catch (e: Exception) {
+            Log.w(TAG, "video: no player (${e.javaClass.simpleName})")
+            null
+        }
+    }
+
+    fun isTv() =app.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
 
     @Suppress("DEPRECATION")
     fun screen(): Screen {

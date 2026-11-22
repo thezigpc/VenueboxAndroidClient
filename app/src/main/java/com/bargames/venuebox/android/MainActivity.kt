@@ -94,6 +94,8 @@ class MainActivity : Activity(), ScreenUi {
     private lateinit var autostartNote: TextView
     private lateinit var grantButton: Button
     private val home by lazy { HomeMode(this) }
+    /** Box 0.28.0 "video": full screen over the page, which keeps running underneath. */
+    private val video by lazy { VideoPlayer(this, root, ctl.http, scope, ::sendVideo) }
     private lateinit var homeSection: LinearLayout
     private lateinit var homeNote: TextView
     private lateinit var homeToggle: Button
@@ -140,7 +142,7 @@ class MainActivity : Activity(), ScreenUi {
         ctl.start()
         ctl.ui = this
         ctl.showing?.let { show(it) }
-        debugShow(intent)
+        handler.post { debugShow(intent) } // after onStart, like a message from the box
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -148,11 +150,32 @@ class MainActivity : Activity(), ScreenUi {
         debugShow(intent)
     }
 
-    /** Debug builds only: adb shell am start -n <pkg>/.android.MainActivity --es debugShow <url> */
+    /**
+     * Debug builds only: adb shell am start -n <pkg>/.android.MainActivity --es debugShow <url>,
+     * or a video op as the box sends it: --es debugVideo play --es url <url> [--es mime ...]
+     * [--es startAt 30]; --es debugVideo pause|resume|stop|status; --es debugVideo seek --es position 600.
+     */
     private fun debugShow(i: Intent?) {
-        if (!BuildConfig.DEBUG) return
-        val u = i?.getStringExtra("debugShow") ?: return
-        show(BoxMsg.Show(SCREEN_ID, u, "native-url", "debug"))
+        if (!BuildConfig.DEBUG || i == null) return
+        i.getStringExtra("debugShow")?.let { onBoxMessage(BoxMsg.Show(SCREEN_ID, it, "native-url", "debug")) }
+        i.removeExtra("debugShow")
+        if (i.hasExtra("debugCaps")) ctl.videoCaps // logs hello's video caps
+        val op = i.getStringExtra("debugVideo") ?: return
+        i.removeExtra("debugVideo")
+        onBoxMessage(
+            BoxMsg.Video(
+                SCREEN_ID, "debug-${System.currentTimeMillis() % 100000}", op,
+                url = i.getStringExtra("url"), title = i.getStringExtra("title") ?: "Debug video",
+                mime = i.getStringExtra("mime"), poster = i.getStringExtra("poster"),
+                startAt = i.getStringExtra("startAt")?.toDoubleOrNull(), position = i.getStringExtra("position")?.toDoubleOrNull(),
+            ),
+        )
+    }
+
+    /** video-reply / video-state to the box (never carries the link; debug builds log them). */
+    private fun sendVideo(msg: String) {
+        if (BuildConfig.DEBUG) Log.d(TAG, "→ $msg")
+        ctl.send(msg)
     }
 
     override fun onResume() {
@@ -217,7 +240,29 @@ class MainActivity : Activity(), ScreenUi {
         if (url != null && !failed) w.evaluateJavascript(js, null)
     }
 
+    /** Out of sight (another app, home): a video stops rather than playing to nobody. */
+    override fun onStop() {
+        onScreen = false
+        if (video.isOpen) video.close(tell = true)
+        super.onStop()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        onScreen = true
+    }
+
+    /** Started and not hidden by another app: a video can play. */
+    private var onScreen = false
+
+    /** The identify banner and the settings panel stay above the video player. */
+    private fun keepOnTop() {
+        if (identifyView.visibility == View.VISIBLE) identifyView.bringToFront()
+        if (panel.visibility == View.VISIBLE) panel.bringToFront()
+    }
+
     override fun onDestroy() {
+        video.close(tell = true)
         (getSystemService(DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(displayListener)
         if (ctl.ui === this) ctl.ui = null
         handler.removeCallbacksAndMessages(null)
@@ -252,7 +297,15 @@ class MainActivity : Activity(), ScreenUi {
 
     override fun onBoxMessage(m: BoxMsg) {
         when (m) {
+            is BoxMsg.Video -> if (m.op == "play" && !onScreen) {
+                sendVideo(ClientMsg.videoReply(m.requestId, false, "error", "the app isn't on screen (another app is open)"))
+            } else {
+                video.handle(m)
+                if (video.isOpen) keepOnTop()
+            }
             is BoxMsg.Show -> if (m.screen == SCREEN_ID) {
+                // A new show closes the video player (the page comes back, then changes).
+                if (video.isOpen) video.close(tell = true)
                 // The box sends native-url (idle pages too, usually as data: URLs). Any other kind
                 // that's a URL is opened as well; only hls needs a player this app doesn't have.
                 if (m.kind == "hls") {
@@ -261,7 +314,10 @@ class MainActivity : Activity(), ScreenUi {
                     show(m)
                 }
             }
-            is BoxMsg.Off -> if (m.screen == SCREEN_ID) off()
+            is BoxMsg.Off -> if (m.screen == SCREEN_ID) {
+                if (video.isOpen) video.close(tell = true)
+                off()
+            }
             is BoxMsg.Reload -> if (m.screen == SCREEN_ID) reload()
             is BoxMsg.Identify -> if (m.screen == SCREEN_ID) identify(m.label)
             is BoxMsg.PreviewRequest -> if (m.screen == SCREEN_ID) preview(m.requestId)
@@ -386,6 +442,31 @@ class MainActivity : Activity(), ScreenUi {
 
     /** A JPEG of what the screen shows, base64, ≲200 KB. */
     private fun preview(requestId: String) {
+        // A video plays on its own surface, which the window copy leaves out: copy that instead.
+        val sv = video.surface?.takeIf { it.width > 0 && it.height > 0 && it.holder.surface.isValid }
+        if (sv != null) {
+            val vb = Bitmap.createBitmap(sv.width, sv.height, Bitmap.Config.ARGB_8888)
+            try {
+                PixelCopy.request(sv, vb, { r ->
+                    if (r != PixelCopy.SUCCESS) return@request vb.recycle().also { previewWindow(requestId) }
+                    scope.launch {
+                        val jpeg = withContext(Dispatchers.Default) { encode(vb) }
+                        vb.recycle()
+                        ctl.send(
+                            if (jpeg != null) ClientMsg.preview(requestId, SCREEN_ID, jpeg, null)
+                            else ClientMsg.preview(requestId, SCREEN_ID, null, "preview too large"),
+                        )
+                    }
+                }, handler)
+                return
+            } catch (_: Exception) {
+                vb.recycle()
+            }
+        }
+        previewWindow(requestId)
+    }
+
+    private fun previewWindow(requestId: String) {
         val w = root.width
         val h = root.height
         if (w <= 0 || h <= 0) {
@@ -596,6 +677,8 @@ class MainActivity : Activity(), ScreenUi {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val code = event.keyCode
+        // A video playing (panel closed): the remote drives the player; Back stops it.
+        if (panel.visibility != View.VISIBLE && video.onKey(event)) return true
         if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_SETTINGS) {
             if (event.action == KeyEvent.ACTION_UP) showPanel(panel.visibility != View.VISIBLE)
             return true

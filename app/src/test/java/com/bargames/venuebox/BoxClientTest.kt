@@ -12,6 +12,7 @@ import com.bargames.venuebox.protocol.BoxMsg
 import com.bargames.venuebox.protocol.ClientMsg
 import com.bargames.venuebox.protocol.DeviceInfo
 import com.bargames.venuebox.protocol.Screen
+import com.bargames.venuebox.protocol.VideoCaps
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,6 +34,7 @@ class BoxClientTest {
     private val messages = CopyOnWriteArrayList<BoxMsg>()
     private val tokens = MemTokens()
     private var boxUrl: String? = null
+    @Volatile private var caps: VideoCaps? = null
     private lateinit var client: BoxClient
 
     private val timing = Timing(backoffMinMs = 50, backoffMaxMs = 200, replacedRetryMs = 60_000, requestTimeoutMs = 2000, pingMs = 5000)
@@ -47,6 +49,7 @@ class BoxClientTest {
             override val token: TokenStore get() = tokens
             override fun device() = DeviceInfo("Bar TV", "androidtv", "Test Stick", "0.1.0")
             override fun screens() = listOf(Screen("main", "Bar TV", 1920, 1080, 60))
+            override fun video() = caps
             override fun onStatus(s: ClientStatus) {
                 statuses.add(s)
             }
@@ -184,6 +187,40 @@ class BoxClientTest {
         val ok = checkBox(defaultHttp(timing), box.url)
         assertEquals(BoxCheck.Ok("test-box", 1), ok)
         assertTrue(checkBox(defaultHttp(timing), "http://127.0.0.1:1") is BoxCheck.Failed)
+    }
+
+    @Test
+    fun aPlayerIsDeclaredInHelloAndVideoOpsRoundTrip() {
+        caps = VideoCaps(listOf("mp4", "mkv", "hls"), listOf("h264", "hevc"), listOf("aac", "eac3"), 2160, true, listOf("eac3"))
+        tokens.set("tok-1")
+        client.restart()
+        await("connected") { client.current is ClientStatus.Connected }
+        val v = box.hellos().single().getJSONObject("video")
+        assertEquals(2160, v.getInt("maxHeight"))
+        assertEquals(true, v.getBoolean("seek"))
+        assertEquals("hevc", v.getJSONArray("video").getString(1))
+        assertEquals("eac3", v.getJSONArray("passthrough").getString(0))
+
+        box.sockets.last().send(
+            """{"type":"video","screen":"main","requestId":"r1","op":"play","url":"http://media.example/v.mkv?api_key=SECRET","title":"A movie","mime":"video/x-matroska","startAt":30}""",
+        )
+        await("video message") { messages.any { it is BoxMsg.Video } }
+        val play = messages.first { it is BoxMsg.Video } as BoxMsg.Video
+        assertEquals("play", play.op)
+        assertEquals(30.0, play.startAt!!, 0.0)
+        assertTrue(client.send(ClientMsg.videoReply(play.requestId, true, state = "loading")))
+        await("video-reply") { box.received.any { it.optString("type") == "video-reply" } }
+        val r = box.received.first { it.optString("type") == "video-reply" }
+        assertEquals("r1", r.getString("requestId"))
+        assertTrue(r.getBoolean("ok"))
+    }
+
+    @Test
+    fun noPlayerMeansNoVideoInHello() {
+        tokens.set("tok-1")
+        client.restart()
+        await("connected") { client.current is ClientStatus.Connected }
+        assertTrue(!box.hellos().single().has("video"))
     }
 
     @Test

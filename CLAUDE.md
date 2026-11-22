@@ -43,6 +43,23 @@ In short: the box is at `http://<box LAN IP>:7210`.
   gesture, screen kept on, no pointer, not focusable (the D-pad stays with the app).
 - `identify` flashes the screen's name. `state` messages on every change. `preview` answers
   with a JPEG of the window (PixelCopy, so video/WebGL are included), base64, at most ~200 KB.
+- Video player (box 0.28.0/0.28.1, `VideoPlayer`): `hello.video` declares what it plays, built
+  once from MediaCodecList (`videoCaps`/`pictureRanges` in `client/VideoFormats.kt`):
+  - h264 always; hevc/av1/vp9 only with a hardware decoder.
+  - maxHeight 2160 when the display has a 4K mode and a hardware decoder does 4K, else 1080.
+  - passthrough from Media3's AudioCapabilities.
+  - ranges: the display's HDR types × HEVC Main10 (hdr10/hdr10plus/hlg) or a Dolby Vision decoder.
+
+  `video` ops (play/pause/resume/stop/status/seek):
+  - ExoPlayer plays full screen over the WebView, which keeps running.
+  - Every op gets a `video-reply`; `video-state` goes out on its own changes, at most every 10 s while playing.
+  - End, stop, Back, a new `show`/`off`, or leaving the app close the player (`stopped`).
+  - Remote: OK/play-pause, left -10 s, right +30 s, Back stops. Previews copy the video's surface.
+
+  **The link and poster carry the media server's key:** never log, store or report them.
+  Media3's logging is off, there's no EventLogger, `BoxMsg.Video.toString` hides them, and
+  errors are described from codes, never exception text. Test on the emulator with
+  `--es debugVideo play --es url <url>` (debug builds; see `debugShow`).
 - The token is AES-GCM encrypted with a key in the Android Keystore (`KeystoreTokenStore`).
 - Start on boot (BOOT_COMPLETED) and go straight to the last box, so a venue TV comes back
   after a power cut. Android 10+ only lets the receiver open the screen if the app may

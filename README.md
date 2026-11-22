@@ -29,6 +29,14 @@ If the TV has no settings page for that permission, grant it from a computer:
 adb shell appops set com.bargames.venuebox SYSTEM_ALERT_WINDOW allow
 ```
 
+## Videos
+
+With box 0.28 or later, apps such as Movies can play a video on this screen: it plays full
+screen over the game page and goes back to the page when it ends. The app tells the box which
+formats this device plays smoothly (including 4K and HDR where both the TV and the device
+support them), so the media server only converts what's needed. On the remote: **OK** or
+play/pause pauses and resumes, **left** jumps back 10 s, **right** forward 30 s, **Back** stops.
+
 ## Tablets and phones
 
 The same APK runs on Android tablets and phones (Android 8+), always in landscape. Open the

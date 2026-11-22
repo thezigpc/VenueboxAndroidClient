@@ -13,6 +13,7 @@ import com.bargames.venuebox.protocol.DeviceInfo
 import com.bargames.venuebox.protocol.PairStart
 import com.bargames.venuebox.protocol.PairStatus
 import com.bargames.venuebox.protocol.Screen
+import com.bargames.venuebox.protocol.VideoCaps
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -58,6 +59,8 @@ interface BoxClientDeps {
     val token: TokenStore
     fun device(): DeviceInfo
     fun screens(): List<Screen>
+    /** What the video player plays (hello's `video`); null: no player, the box never sends `video`. */
+    fun video(): VideoCaps? = null
     fun onStatus(s: ClientStatus)
     fun onMessage(m: BoxMsg)
     fun log(msg: String) {}
@@ -331,7 +334,7 @@ class BoxClient(
         }
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                webSocket.send(ClientMsg.hello(token, d.device(), d.screens()))
+                webSocket.send(ClientMsg.hello(token, d.device(), d.screens(), d.video()))
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {

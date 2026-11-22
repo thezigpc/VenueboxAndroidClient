@@ -41,17 +41,91 @@ data class Screen(val id: String, val name: String, val w: Int, val h: Int, val 
 
 data class DeviceInfo(val name: String, val platform: String, val model: String?, val appVersion: String?)
 
+/**
+ * Box 0.28.0, hello's `video`: what this device's player plays, lower-case Jellyfin names
+ * (containers mp4 mkv mov webm ts hls; video h264 hevc av1 vp9; audio aac mp3 ac3 eac3 dts
+ * truehd opus flac). Apps choose direct play or a transcode from it, so it must be accurate.
+ */
+data class VideoCaps(
+    val containers: List<String>,
+    val video: List<String>,
+    val audio: List<String>,
+    val maxHeight: Int?,
+    val seek: Boolean,
+    val passthrough: List<String> = emptyList(),
+    /** Box 0.28.1: picture ranges shown correctly end to end: sdr hdr10 hdr10plus hlg dovi. */
+    val ranges: List<String> = emptyList(),
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("containers", JSONArray(containers))
+        put("video", JSONArray(video))
+        put("audio", JSONArray(audio))
+        if (maxHeight != null) put("maxHeight", maxHeight)
+        put("seek", seek)
+        if (passthrough.isNotEmpty()) put("passthrough", JSONArray(passthrough))
+        if (ranges.isNotEmpty()) put("ranges", JSONArray(ranges))
+    }
+}
+
+/** video-reply / video-state `state`. */
+object VideoState {
+    const val LOADING = "loading"
+    const val PLAYING = "playing"
+    const val PAUSED = "paused"
+    const val STOPPED = "stopped"
+    const val ERROR = "error"
+}
+
 // ---------------------------------------------------------------- client → box
 
 object ClientMsg {
-    fun hello(token: String, device: DeviceInfo, screens: List<Screen>): String = JSONObject().apply {
+    fun hello(token: String, device: DeviceInfo, screens: List<Screen>, video: VideoCaps? = null): String = JSONObject().apply {
         put("type", "hello")
         put("v", CLIENT_PROTOCOL)
         put("token", token)
         putDevice(device)
         put("screens", screensJson(screens))
         put("deliveries", JSONArray().put("native-url"))
+        if (video != null) put("video", video.toJson())
     }.toString()
+
+    /**
+     * The answer to every "video" op (same requestId). reason: "unsupported" | "not-allowed" |
+     * "error". [message] must never contain the link. state/position/duration: for "status".
+     */
+    fun videoReply(
+        requestId: String,
+        ok: Boolean,
+        reason: String? = null,
+        message: String? = null,
+        state: String? = null,
+        position: Double? = null,
+        duration: Double? = null,
+    ): String = JSONObject().apply {
+        put("type", "video-reply")
+        put("requestId", requestId)
+        put("ok", ok)
+        if (reason != null) put("reason", reason)
+        if (!message.isNullOrEmpty()) put("message", message)
+        if (state != null) put("state", state)
+        putSeconds("position", position)
+        putSeconds("duration", duration)
+    }.toString()
+
+    /** The player changed by itself (started, buffering, ended, failed, the TV's remote). */
+    fun videoState(screen: String, state: String, position: Double? = null, duration: Double? = null, message: String? = null): String =
+        JSONObject().apply {
+            put("type", "video-state")
+            put("screen", screen)
+            put("state", state)
+            putSeconds("position", position)
+            putSeconds("duration", duration)
+            if (!message.isNullOrEmpty()) put("message", message)
+        }.toString()
+
+    private fun JSONObject.putSeconds(key: String, v: Double?) {
+        if (v != null && v.isFinite() && v >= 0) put(key, Math.round(v * 10) / 10.0)
+    }
 
     fun screens(screens: List<Screen>): String =
         JSONObject().put("type", "screens").put("screens", screensJson(screens)).toString()
@@ -97,6 +171,27 @@ sealed interface BoxMsg {
     data class Identify(val screen: String, val label: String?) : BoxMsg
     data class PreviewRequest(val screen: String, val requestId: String) : BoxMsg
     data class Error(val code: String, val message: String) : BoxMsg
+    /**
+     * Box 0.28.0: play a video link over the page, or control it. op: play | pause | resume |
+     * stop | status | seek. [url] and [poster] carry the media server's key: never log, store
+     * or report them (toString leaves them out).
+     */
+    class Video(
+        val screen: String,
+        val requestId: String,
+        val op: String,
+        val url: String? = null,
+        val title: String? = null,
+        val mime: String? = null,
+        val poster: String? = null,
+        /** Seconds, for play. */
+        val startAt: Double? = null,
+        /** Seconds, for seek. */
+        val position: Double? = null,
+    ) : BoxMsg {
+        override fun toString() = "Video(screen=$screen, requestId=$requestId, op=$op, title=$title, mime=$mime, " +
+            "startAt=$startAt, position=$position, url=${if (url == null) "none" else "<hidden>"})"
+    }
     /** Anything this version doesn't know (e.g. a future "settings"): ignored. */
     data class Unknown(val type: String) : BoxMsg
 
@@ -129,6 +224,17 @@ sealed interface BoxMsg {
                 "identify" -> Identify(screen, o.optStringOrNull("label"))
                 "preview" -> PreviewRequest(screen, o.optString("requestId", ""))
                 "error" -> Error(o.optString("code", ""), o.optString("message", ""))
+                "video" -> Video(
+                    screen,
+                    o.optString("requestId", ""),
+                    o.optString("op", ""),
+                    o.optStringOrNull("url"),
+                    o.optStringOrNull("title"),
+                    o.optStringOrNull("mime"),
+                    o.optStringOrNull("poster"),
+                    o.optSecondsOrNull("startAt"),
+                    o.optSecondsOrNull("position"),
+                )
                 else -> Unknown(type)
             }
         }
@@ -137,6 +243,9 @@ sealed interface BoxMsg {
 
 private fun JSONObject.optStringOrNull(key: String): String? =
     if (has(key) && !isNull(key)) optString(key).takeIf { it.isNotEmpty() } else null
+
+private fun JSONObject.optSecondsOrNull(key: String): Double? =
+    if (has(key) && !isNull(key)) optDouble(key).takeIf { it.isFinite() && it >= 0 } else null
 
 // ---------------------------------------------------------------- HTTP replies
 
