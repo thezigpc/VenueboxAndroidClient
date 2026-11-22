@@ -56,6 +56,17 @@ In short: the box is at `http://<box LAN IP>:7210`.
   - End, stop, Back, a new `show`/`off`, or leaving the app close the player (`stopped`).
   - Remote: OK/play-pause, left -10 s, right +30 s, Back stops. Previews copy the video's surface.
 
+  Tracks (box 0.29.0, `client/VideoTracks.kt`): `hello.video.tracks = true`; play's `tracks`.
+  - A track's `index` picks the n-th audio / text group (the stream's own text groups only).
+  - `url` subtitles are added as SubtitleConfigurations with Format id `vb-sub:<id>`.
+  - Selections wait for `onTracksChanged`. `audio`/`subtitle` ids go in status replies and video-state.
+  - Down (or Captions) opens the "Audio & subtitles" menu.
+  - A track not in the stream, or media Next/Previous, sends `video-remote`.
+
+  Remote keys (`hello.keys`, `Controller.remoteKeys`): arrows, Select, Back, plus volume when
+  `AudioManager.isVolumeFixed` is false. `key` drives the player while a video plays,
+  otherwise the WebView (Select = Enter, Back = Escape).
+
   **The link and poster carry the media server's key:** never log, store or report them.
   Media3's logging is off, there's no EventLogger, `BoxMsg.Video.toString` hides them, and
   errors are described from codes, never exception text. Test on the emulator with

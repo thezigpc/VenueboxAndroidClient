@@ -6,6 +6,8 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.res.Configuration
 import android.hardware.display.DisplayManager
+import android.media.AudioManager
+import android.os.SystemClock
 import android.view.Display
 import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
@@ -159,15 +161,20 @@ class MainActivity : Activity(), ScreenUi {
         if (!BuildConfig.DEBUG || i == null) return
         i.getStringExtra("debugShow")?.let { onBoxMessage(BoxMsg.Show(SCREEN_ID, it, "native-url", "debug")) }
         i.removeExtra("debugShow")
-        if (i.hasExtra("debugCaps")) ctl.videoCaps // logs hello's video caps
+        if (i.hasExtra("debugCaps")) Log.i(TAG, "remote keys: ${ctl.remoteKeys()}; video: ${ctl.videoCaps?.toJson()}")
+        i.getStringExtra("debugKey")?.let { onBoxMessage(BoxMsg.Key(SCREEN_ID, it)) }
+        i.removeExtra("debugKey")
         val op = i.getStringExtra("debugVideo") ?: return
         i.removeExtra("debugVideo")
+        // --es tracks '<play tracks JSON>'; --es id <track id> (subtitle: "null" = off)
+        val tracks = i.getStringExtra("tracks")?.let { com.bargames.venuebox.protocol.Tracks.parse(org.json.JSONObject(it)) }
         onBoxMessage(
             BoxMsg.Video(
                 SCREEN_ID, "debug-${System.currentTimeMillis() % 100000}", op,
                 url = i.getStringExtra("url"), title = i.getStringExtra("title") ?: "Debug video",
                 mime = i.getStringExtra("mime"), poster = i.getStringExtra("poster"),
                 startAt = i.getStringExtra("startAt")?.toDoubleOrNull(), position = i.getStringExtra("position")?.toDoubleOrNull(),
+                tracks = tracks, trackId = i.getStringExtra("id")?.takeIf { it != "null" },
             ),
         )
     }
@@ -314,6 +321,7 @@ class MainActivity : Activity(), ScreenUi {
                     show(m)
                 }
             }
+            is BoxMsg.Key -> if (m.screen == SCREEN_ID) boxKey(m.key)
             is BoxMsg.Off -> if (m.screen == SCREEN_ID) {
                 if (video.isOpen) video.close(tell = true)
                 off()
@@ -323,6 +331,55 @@ class MainActivity : Activity(), ScreenUi {
             is BoxMsg.PreviewRequest -> if (m.screen == SCREEN_ID) preview(m.requestId)
             else -> {}
         }
+    }
+
+    /**
+     * Box 0.29.0: a key from the box's remote. While a video plays it drives the player (arrows
+     * move in its menu); otherwise it goes to the page as that key (Select = Enter, Back = Escape).
+     */
+    private fun boxKey(key: String) {
+        val volume = when (key) {
+            "VolumeUp" -> AudioManager.ADJUST_RAISE
+            "VolumeDown" -> AudioManager.ADJUST_LOWER
+            "VolumeMute" -> AudioManager.ADJUST_TOGGLE_MUTE
+            else -> null
+        }
+        if (volume != null) {
+            if (ctl.volumeIsOurs()) {
+                (getSystemService(AUDIO_SERVICE) as AudioManager).adjustStreamVolume(AudioManager.STREAM_MUSIC, volume, AudioManager.FLAG_SHOW_UI)
+            }
+            return
+        }
+        val code = when (key) {
+            "Up" -> KeyEvent.KEYCODE_DPAD_UP
+            "Down" -> KeyEvent.KEYCODE_DPAD_DOWN
+            "Left" -> KeyEvent.KEYCODE_DPAD_LEFT
+            "Right" -> KeyEvent.KEYCODE_DPAD_RIGHT
+            "Select" -> KeyEvent.KEYCODE_DPAD_CENTER
+            "Back" -> KeyEvent.KEYCODE_BACK
+            "Play" -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            "Rev" -> KeyEvent.KEYCODE_MEDIA_REWIND
+            "Fwd" -> KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
+            else -> {
+                Log.i(TAG, "ignoring remote key '$key'")
+                return
+            }
+        }
+        if (video.isOpen) return press(code) { video.onKey(it) }
+        val w = web ?: return
+        if (url == null || failed) return
+        val pageCode = when (code) {
+            KeyEvent.KEYCODE_DPAD_CENTER -> KeyEvent.KEYCODE_ENTER
+            KeyEvent.KEYCODE_BACK -> KeyEvent.KEYCODE_ESCAPE
+            else -> code
+        }
+        press(pageCode) { w.dispatchKeyEvent(it) }
+    }
+
+    private fun press(code: Int, to: (KeyEvent) -> Unit) {
+        val t = SystemClock.uptimeMillis()
+        to(KeyEvent(t, t, KeyEvent.ACTION_DOWN, code, 0))
+        to(KeyEvent(t, t, KeyEvent.ACTION_UP, code, 0))
     }
 
     private fun show(m: BoxMsg.Show) {

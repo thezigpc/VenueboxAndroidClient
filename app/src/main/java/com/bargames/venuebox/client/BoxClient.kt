@@ -61,6 +61,8 @@ interface BoxClientDeps {
     fun screens(): List<Screen>
     /** What the video player plays (hello's `video`); null: no player, the box never sends `video`. */
     fun video(): VideoCaps? = null
+    /** Box 0.29.0: remote keys taken as "key" messages (see CLIENT_KEYS). */
+    fun keys(): List<String> = emptyList()
     fun onStatus(s: ClientStatus)
     fun onMessage(m: BoxMsg)
     fun log(msg: String) {}
@@ -334,7 +336,7 @@ class BoxClient(
         }
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                webSocket.send(ClientMsg.hello(token, d.device(), d.screens(), d.video()))
+                webSocket.send(ClientMsg.hello(token, d.device(), d.screens(), d.video(), d.keys()))
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {

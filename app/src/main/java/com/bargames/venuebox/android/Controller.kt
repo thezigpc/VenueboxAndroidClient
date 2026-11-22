@@ -3,6 +3,7 @@ package com.bargames.venuebox.android
 import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -95,6 +96,7 @@ class Controller(private val app: Application) {
         override fun device() = deviceInfo()
         override fun screens() = listOf(screen())
         override fun video() = videoCaps
+        override fun keys() = remoteKeys()
         override fun onStatus(s: ClientStatus) = main.post {
             if (s !is ClientStatus.Connected) Log.i(TAG, "status: ${redact(s)}")
             if (s is ClientStatus.Connected) {
@@ -269,7 +271,18 @@ class Controller(private val app: Application) {
         }
     }
 
-    fun isTv() =app.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+    /** The device's volume is the app's to change (not fixed, e.g. by HDMI-CEC to the TV's own). */
+    fun volumeIsOurs() = !(app.getSystemService(Context.AUDIO_SERVICE) as AudioManager).isVolumeFixed
+
+    /**
+     * Box 0.29.0: the box remote's keys this screen takes as "key" messages: the arrows, Select
+     * and Back (the page, or the video player's menu), and volume where it's the app's to change.
+     * Play/Rev/Fwd aren't declared: the box turns them into video ops while a video plays.
+     */
+    fun remoteKeys() = listOf("Up", "Down", "Left", "Right", "Select", "Back") +
+        (if (volumeIsOurs()) listOf("VolumeUp", "VolumeDown", "VolumeMute") else emptyList())
+
+    fun isTv() = app.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
 
     @Suppress("DEPRECATION")
     fun screen(): Screen {

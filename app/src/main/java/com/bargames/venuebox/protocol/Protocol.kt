@@ -55,6 +55,8 @@ data class VideoCaps(
     val passthrough: List<String> = emptyList(),
     /** Box 0.28.1: picture ranges shown correctly end to end: sdr hdr10 hdr10plus hlg dovi. */
     val ranges: List<String> = emptyList(),
+    /** Box 0.29.0: it takes play's `tracks` and the "audio" / "subtitle" ops. */
+    val tracks: Boolean = false,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("containers", JSONArray(containers))
@@ -64,8 +66,85 @@ data class VideoCaps(
         put("seek", seek)
         if (passthrough.isNotEmpty()) put("passthrough", JSONArray(passthrough))
         if (ranges.isNotEmpty()) put("ranges", JSONArray(ranges))
+        if (tracks) put("tracks", true)
     }
 }
+
+/**
+ * Box 0.29.0: an audio track or subtitle of the video. [index]: inside the stream, 0-based
+ * among tracks of its kind in container order. [url]: a subtitle side file (it carries the
+ * media server's key: toString leaves it out). Neither: not in this stream.
+ */
+class Track(
+    val id: String,
+    val label: String,
+    val language: String? = null,
+    val index: Int? = null,
+    val url: String? = null,
+    /** vtt | srt | ass, for a [url] subtitle. */
+    val format: String? = null,
+    val forced: Boolean = false,
+    val default: Boolean = false,
+) {
+    /** The player can switch to it without the app restarting the stream. */
+    val inStream get() = index != null || url != null
+
+    override fun toString() = "Track(id=$id, label=$label, index=$index, url=${if (url == null) "none" else "<hidden>"})"
+
+    companion object {
+        fun parse(o: JSONObject?): Track? {
+            o ?: return null
+            val id = o.optString("id", "")
+            if (id.isEmpty()) return null
+            return Track(
+                id,
+                o.optString("label", id),
+                o.optStringOrNull("language"),
+                if (o.has("index") && !o.isNull("index")) o.optInt("index", -1).takeIf { it >= 0 } else null,
+                o.optStringOrNull("url"),
+                o.optStringOrNull("format")?.lowercase(),
+                o.optBoolean("forced", false),
+                o.optBoolean("default", false),
+            )
+        }
+    }
+}
+
+/**
+ * Box 0.29.0: play's `tracks`. [subtitleId] null with [subtitleGiven]: start with subtitles
+ * off; not given: the player's own default.
+ */
+class Tracks(
+    val audio: List<Track>,
+    val subtitles: List<Track>,
+    val audioId: String? = null,
+    val subtitleId: String? = null,
+    val subtitleGiven: Boolean = false,
+) {
+    override fun toString() = "Tracks(audio=$audio, subtitles=$subtitles, audioId=$audioId, subtitleId=$subtitleId)"
+
+    companion object {
+        fun parse(o: JSONObject?): Tracks? {
+            o ?: return null
+            fun list(key: String) = o.optJSONArray(key)?.let { a -> (0 until a.length()).mapNotNull { Track.parse(a.optJSONObject(it)) } }.orEmpty()
+            return Tracks(list("audio"), list("subtitles"), o.optStringOrNull("audioId"), o.optStringOrNull("subtitleId"), o.has("subtitleId"))
+        }
+    }
+}
+
+/** Which tracks are on, for video-reply / video-state (subtitle null: off). */
+data class TracksOn(val audio: String?, val subtitle: String?)
+
+/** Box 0.29.0 video-remote: asked on the device for something only the app can do. */
+sealed interface RemoteAsk {
+    data object Next : RemoteAsk
+    data object Previous : RemoteAsk
+    data class Audio(val id: String) : RemoteAsk
+    data class Subtitle(val id: String?) : RemoteAsk
+}
+
+/** Box 0.29.0: remote keys a client may take as "key" messages. */
+val CLIENT_KEYS = listOf("Up", "Down", "Left", "Right", "Select", "Back", "Home", "Play", "Rev", "Fwd", "VolumeUp", "VolumeDown", "VolumeMute")
 
 /** video-reply / video-state `state`. */
 object VideoState {
@@ -79,7 +158,13 @@ object VideoState {
 // ---------------------------------------------------------------- client → box
 
 object ClientMsg {
-    fun hello(token: String, device: DeviceInfo, screens: List<Screen>, video: VideoCaps? = null): String = JSONObject().apply {
+    fun hello(
+        token: String,
+        device: DeviceInfo,
+        screens: List<Screen>,
+        video: VideoCaps? = null,
+        keys: List<String> = emptyList(),
+    ): String = JSONObject().apply {
         put("type", "hello")
         put("v", CLIENT_PROTOCOL)
         put("token", token)
@@ -87,7 +172,30 @@ object ClientMsg {
         put("screens", screensJson(screens))
         put("deliveries", JSONArray().put("native-url"))
         if (video != null) put("video", video.toJson())
+        val k = CLIENT_KEYS.filter { it in keys }
+        if (k.isNotEmpty()) put("keys", JSONArray(k))
     }.toString()
+
+    /** Asked on the device for something only the app can do (next episode, a track not in this stream). */
+    fun videoRemote(screen: String, action: RemoteAsk): String = JSONObject().apply {
+        put("type", "video-remote")
+        put("screen", screen)
+        put(
+            "action",
+            when (action) {
+                RemoteAsk.Next -> "next"
+                RemoteAsk.Previous -> "previous"
+                is RemoteAsk.Audio -> JSONObject().put("audio", action.id)
+                is RemoteAsk.Subtitle -> JSONObject().put("subtitle", action.id ?: JSONObject.NULL)
+            },
+        )
+    }.toString()
+
+    private fun JSONObject.putTracks(on: TracksOn?) {
+        on ?: return
+        if (on.audio != null) put("audio", on.audio)
+        put("subtitle", on.subtitle ?: JSONObject.NULL)
+    }
 
     /**
      * The answer to every "video" op (same requestId). reason: "unsupported" | "not-allowed" |
@@ -101,6 +209,7 @@ object ClientMsg {
         state: String? = null,
         position: Double? = null,
         duration: Double? = null,
+        tracks: TracksOn? = null,
     ): String = JSONObject().apply {
         put("type", "video-reply")
         put("requestId", requestId)
@@ -110,10 +219,18 @@ object ClientMsg {
         if (state != null) put("state", state)
         putSeconds("position", position)
         putSeconds("duration", duration)
+        putTracks(tracks)
     }.toString()
 
     /** The player changed by itself (started, buffering, ended, failed, the TV's remote). */
-    fun videoState(screen: String, state: String, position: Double? = null, duration: Double? = null, message: String? = null): String =
+    fun videoState(
+        screen: String,
+        state: String,
+        position: Double? = null,
+        duration: Double? = null,
+        message: String? = null,
+        tracks: TracksOn? = null,
+    ): String =
         JSONObject().apply {
             put("type", "video-state")
             put("screen", screen)
@@ -121,6 +238,7 @@ object ClientMsg {
             putSeconds("position", position)
             putSeconds("duration", duration)
             if (!message.isNullOrEmpty()) put("message", message)
+            putTracks(tracks)
         }.toString()
 
     private fun JSONObject.putSeconds(key: String, v: Double?) {
@@ -188,10 +306,16 @@ sealed interface BoxMsg {
         val startAt: Double? = null,
         /** Seconds, for seek. */
         val position: Double? = null,
+        /** Box 0.29.0, for play: the video's audio tracks and subtitles. */
+        val tracks: Tracks? = null,
+        /** Box 0.29.0, for "audio" / "subtitle": the track id (subtitle null: off). */
+        val trackId: String? = null,
     ) : BoxMsg {
         override fun toString() = "Video(screen=$screen, requestId=$requestId, op=$op, title=$title, mime=$mime, " +
-            "startAt=$startAt, position=$position, url=${if (url == null) "none" else "<hidden>"})"
+            "startAt=$startAt, position=$position, trackId=$trackId, tracks=$tracks, url=${if (url == null) "none" else "<hidden>"})"
     }
+    /** Box 0.29.0: a key from the box's remote for this screen (one of [CLIENT_KEYS] it declared). */
+    data class Key(val screen: String, val key: String) : BoxMsg
     /** Anything this version doesn't know (e.g. a future "settings"): ignored. */
     data class Unknown(val type: String) : BoxMsg
 
@@ -234,7 +358,10 @@ sealed interface BoxMsg {
                     o.optStringOrNull("poster"),
                     o.optSecondsOrNull("startAt"),
                     o.optSecondsOrNull("position"),
+                    Tracks.parse(o.optJSONObject("tracks")),
+                    o.optStringOrNull("id"),
                 )
+                "key" -> Key(screen, o.optString("key", ""))
                 else -> Unknown(type)
             }
         }

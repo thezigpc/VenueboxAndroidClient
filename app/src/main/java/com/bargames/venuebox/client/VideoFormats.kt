@@ -87,5 +87,6 @@ fun videoCaps(
         seek = true,
         passthrough = AUDIO_NAMES.values.filter { it in passthrough },
         ranges = pictureRanges(decoders, displayHdr),
+        tracks = true,
     )
 }

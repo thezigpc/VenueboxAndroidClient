@@ -35,7 +35,10 @@ With box 0.28 or later, apps such as Movies can play a video on this screen: it 
 screen over the game page and goes back to the page when it ends. The app tells the box which
 formats this device plays smoothly (including 4K and HDR where both the TV and the device
 support them), so the media server only converts what's needed. On the remote: **OK** or
-play/pause pauses and resumes, **left** jumps back 10 s, **right** forward 30 s, **Back** stops.
+play/pause pauses and resumes, **left** jumps back 10 s, **right** forward 30 s, **Back** stops,
+**down** opens **Audio & subtitles** (box 0.29+), and next/previous ask the app for the next or
+previous video. The box's TVs page also has a remote for the screen; its arrows, OK and Back work
+in the player and on game pages, and its volume keys where the device controls its own volume.
 
 ## Tablets and phones
 

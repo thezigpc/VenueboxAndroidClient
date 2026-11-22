@@ -47,10 +47,24 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.bargames.venuebox.BuildConfig
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import androidx.media3.common.TrackSelectionOverride
 import com.bargames.venuebox.client.Decoder
+import com.bargames.venuebox.client.MenuRow
+import com.bargames.venuebox.client.Pick
+import com.bargames.venuebox.client.SIDE_SUBTITLE_PREFIX
+import com.bargames.venuebox.client.pickAudio
+import com.bargames.venuebox.client.pickSubtitle
+import com.bargames.venuebox.client.sideSubtitles
+import com.bargames.venuebox.client.tracksOn
 import com.bargames.venuebox.client.videoCaps
+import com.bargames.venuebox.client.menuRows as buildMenuRows
 import com.bargames.venuebox.protocol.BoxMsg
 import com.bargames.venuebox.protocol.ClientMsg
+import com.bargames.venuebox.protocol.RemoteAsk
+import com.bargames.venuebox.protocol.TracksOn
+import com.bargames.venuebox.protocol.Tracks as BoxTracks
 import com.bargames.venuebox.protocol.VideoCaps
 import com.bargames.venuebox.protocol.VideoState
 import kotlinx.coroutines.CoroutineScope
@@ -91,6 +105,19 @@ class VideoPlayer(
     private var error: String? = null
     /** When the last video-state went out (uptime ms): while playing, one at most every 10 s. */
     private var lastPush = 0L
+
+    /** Box 0.29.0: play's tracks (null: the box sent none: no menu, no ids reported). */
+    private var tracks: BoxTracks? = null
+    /** The track ids on now (from the player's selection once it has tracks). */
+    private var on: TracksOn? = null
+    /** The ids the box last heard (a change made on the device gets a video-state). */
+    private var toldOn: TracksOn? = null
+    /** Selections waiting for the stream's tracks to be known. */
+    private var wantAudio: Pick? = null
+    private var wantSub: Pick? = null
+    private var menu: LinearLayout? = null
+    private var menuRows: List<MenuRow> = emptyList()
+    private var menuSel = 0
 
     val isOpen get() = view != null
 
@@ -137,6 +164,19 @@ class VideoPlayer(
                 told = state()
                 reply(m, true, state = told, withTime = true)
             }
+            "audio", "subtitle" -> {
+                if (player == null || error != null) return reply(m, false, "error", "nothing is playing")
+                val audio = m.op == "audio"
+                when (val pick = if (audio) pickAudio(tracks, m.trackId) else pickSubtitle(tracks, m.trackId)) {
+                    Pick.NoSuchTrack -> reply(m, false, "error", "no such ${if (audio) "audio track" else "subtitle"}")
+                    Pick.NotInStream -> reply(m, false, "unsupported", "that ${if (audio) "audio track" else "subtitle"} isn't in this stream")
+                    else -> {
+                        switchTrack(audio, m.trackId, pick)
+                        toldOn = on
+                        reply(m, true, state = state(), withTime = true)
+                    }
+                }
+            }
             else -> reply(m, false, "unsupported", "unknown video op '${m.op}'")
         }
     }
@@ -171,14 +211,30 @@ class VideoPlayer(
         }
         player = p
         p.addListener(listener)
-        val item = MediaItem.Builder().setUri(url).apply { hlsHint(m.mime)?.let { setMimeType(it) } }.build()
+        val t = m.tracks
+        tracks = t
+        wantAudio = t?.audioId?.let { pickAudio(t, it) }?.takeIf { it is Pick.Embedded }
+        wantSub = if (t?.subtitleGiven == true) pickSubtitle(t, t.subtitleId).takeIf { it is Pick.Off || it is Pick.Embedded || it is Pick.Side } else null
+        on = t?.let { TracksOn(it.audioId, if (it.subtitleGiven) it.subtitleId else null) }
+        toldOn = on
+        val subs = sideSubtitles(t).map { s ->
+            MediaItem.SubtitleConfiguration.Builder(Uri.parse(s.url))
+                .setId(SIDE_SUBTITLE_PREFIX + s.id)
+                .setMimeType(subtitleMime(s.format, s.url!!))
+                .setLanguage(s.language)
+                .setLabel(s.label)
+                .setSelectionFlags((if (s.forced) C.SELECTION_FLAG_FORCED else 0) or (if (s.default) C.SELECTION_FLAG_DEFAULT else 0))
+                .build()
+        }
+        val item = MediaItem.Builder().setUri(url).setSubtitleConfigurations(subs).apply { hlsHint(m.mime)?.let { setMimeType(it) } }.build()
+        if (wantSub == Pick.Off) p.trackSelectionParameters = p.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
         val startMs = m.startAt?.let { (it * 1000).toLong() } ?: 0L
         p.setMediaItem(item, startMs)
         p.prepare()
         p.playWhenReady = true
         openView(p, m.poster)
         told = VideoState.LOADING
-        reply(m, true, state = VideoState.LOADING)
+        reply(m, true, state = VideoState.LOADING, withTracks = true)
         lastPush = SystemClock.uptimeMillis()
         handler.removeCallbacks(tick)
         handler.postDelayed(tick, 1000)
@@ -197,6 +253,7 @@ class VideoPlayer(
         val p = player
         val pos = p?.let { seconds(it.currentPosition) }
         val dur = p?.let { durationOf(it) }
+        val lastOn = on
         player = null
         p?.removeListener(listener)
         p?.release()
@@ -204,13 +261,20 @@ class VideoPlayer(
         view?.let { root.removeView(it) }
         poster?.let { root.removeView(it) }
         overlay?.let { root.removeView(it) }
+        menu?.let { root.removeView(it) }
         view = null
         poster = null
         overlay = null
+        menu = null
         error = null
+        tracks = null
+        on = null
+        toldOn = null
+        wantAudio = null
+        wantSub = null
         if (wasOpen) {
             Log.i(TAG, "video: closed")
-            if (tell) send(ClientMsg.videoState(SCREEN_ID, VideoState.STOPPED, pos, dur))
+            if (tell) send(ClientMsg.videoState(SCREEN_ID, VideoState.STOPPED, pos, dur, tracks = lastOn))
             told = VideoState.STOPPED
         }
     }
@@ -222,7 +286,21 @@ class VideoPlayer(
         val p = player
         if (!isOpen) return false
         val down = e.action == KeyEvent.ACTION_DOWN
+        if (menu != null && menuKey(e)) return true
         when (e.keyCode) {
+            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CAPTIONS -> {
+                if (down && e.repeatCount == 0) {
+                    if (tracks != null && error == null) openMenu() else showOverlay()
+                }
+                return true
+            }
+            KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                if (down && e.repeatCount == 0) {
+                    val next = e.keyCode == KeyEvent.KEYCODE_MEDIA_NEXT
+                    ask(if (next) RemoteAsk.Next else RemoteAsk.Previous, if (next) "Next…" else "Previous…")
+                }
+                return true
+            }
             KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_MEDIA_STOP -> {
                 if (e.action == KeyEvent.ACTION_UP) close(tell = true)
                 return true
@@ -251,7 +329,7 @@ class VideoPlayer(
                 if (down && p != null) seekBy(p, FORWARD_MS)
                 return true
             }
-            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_INFO -> {
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_INFO -> {
                 if (down) showOverlay()
                 return true
             }
@@ -276,6 +354,174 @@ class VideoPlayer(
         push(force = true)
     }
 
+    /** Something only the app can do (next episode, a track not in this stream): the box hands it over. */
+    private fun ask(action: RemoteAsk, note: String) {
+        Log.i(TAG, "video: asking the app: $action")
+        send(ClientMsg.videoRemote(SCREEN_ID, action))
+        flash(note)
+    }
+
+    private fun flash(note: String) {
+        val o = overlay ?: return
+        o.text = note
+        o.visibility = View.VISIBLE
+        handler.removeCallbacks(hideOverlay)
+        handler.postDelayed(hideOverlay, OVERLAY_MS)
+    }
+
+    // ---------------------------------------------------------------- tracks
+
+    /** Switch to [id] ([pick] from [pickAudio]/[pickSubtitle], in the stream or off). */
+    private fun switchTrack(audio: Boolean, id: String?, pick: Pick) {
+        if (audio) wantAudio = pick else wantSub = pick
+        on = (on ?: TracksOn(null, null)).let { if (audio) it.copy(audio = id) else it.copy(subtitle = id) }
+        player?.let { applySelection(it) }
+    }
+
+    /** Applies waiting selections once the stream's tracks are known; false: not yet. */
+    private fun applySelection(p: ExoPlayer): Boolean {
+        if (wantAudio == null && wantSub == null) return true
+        val groups = p.currentTracks.groups
+        if (groups.isEmpty()) return false
+        val b = p.trackSelectionParameters.buildUpon()
+        (wantAudio as? Pick.Embedded)?.let { pick ->
+            val g = groups.filter { it.type == C.TRACK_TYPE_AUDIO }.getOrNull(pick.index)
+            if (g != null) b.setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false).setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, 0))
+            else Log.w(TAG, "video: no audio track ${pick.index} in the stream")
+        }
+        when (val pick = wantSub) {
+            Pick.Off -> b.clearOverridesOfType(C.TRACK_TYPE_TEXT).setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            is Pick.Embedded, is Pick.Side -> {
+                val text = groups.filter { it.type == C.TRACK_TYPE_TEXT }
+                val g = if (pick is Pick.Side) text.firstOrNull { sideId(it) == pick.id } else text.filter { sideId(it) == null }.getOrNull((pick as Pick.Embedded).index)
+                if (g != null) b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, 0))
+                else Log.w(TAG, "video: that subtitle isn't among the stream's tracks")
+            }
+            else -> {}
+        }
+        wantAudio = null
+        wantSub = null
+        p.trackSelectionParameters = b.build()
+        return true
+    }
+
+    /** The track ids the player has on, from its selection (null before it knows its tracks). */
+    private fun selectedOn(p: ExoPlayer): TracksOn? {
+        val t = tracks ?: return null
+        val groups = p.currentTracks.groups
+        if (groups.isEmpty()) return null
+        val audio = groups.filter { it.type == C.TRACK_TYPE_AUDIO }.indexOfFirst { it.isSelected }.takeIf { it >= 0 }
+        val text = groups.filter { it.type == C.TRACK_TYPE_TEXT }
+        val sel = text.firstOrNull { it.isSelected }
+        val side = sel?.let { sideId(it) }
+        val embedded = if (sel != null && side == null) text.filter { sideId(it) == null }.indexOf(sel) else null
+        val now = tracksOn(t, audio, embedded, side)
+        // A track the box listed without an index (e.g. HLS's one audio) keeps the id it asked for.
+        return if (now.audio == null) now.copy(audio = on?.audio) else now
+    }
+
+    /** A side-loaded subtitle's track id, or null for the stream's own. */
+    private fun sideId(g: androidx.media3.common.Tracks.Group): String? {
+        val ids = listOfNotNull(g.getTrackFormat(0).id, g.mediaTrackGroup.id)
+        return ids.firstNotNullOfOrNull { s -> s.indexOf(SIDE_SUBTITLE_PREFIX).takeIf { it >= 0 }?.let { s.substring(it + SIDE_SUBTITLE_PREFIX.length) } }
+    }
+
+    // ---------------------------------------------------------------- the "Audio & subtitles" menu
+
+    private fun openMenu() {
+        val t = tracks ?: return
+        menu?.let { root.removeView(it) }
+        menuRows = buildMenuRows(t, on ?: TracksOn(null, null))
+        menuSel = menuRows.indexOfFirst { it.on && it.selectable }.takeIf { it >= 0 } ?: menuRows.indexOfFirst { it.selectable }
+        val col = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+        }
+        col.addView(menuText("Audio & subtitles", 24f, bold = true))
+        menuRows.forEach { col.addView(menuText("", 20f, bold = it.kind == "header")) }
+        val scroll = ScrollView(act).apply { addView(col); isFocusable = false }
+        val box = LinearLayout(act).apply {
+            setBackgroundColor(0xF0101114.toInt())
+            addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        root.addView(box, FrameLayout.LayoutParams(dp(420), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END))
+        menu = box
+        renderMenu()
+    }
+
+    private fun closeMenu() {
+        menu?.let { root.removeView(it) }
+        menu = null
+    }
+
+    private fun menuText(s: String, sp: Float, bold: Boolean) = TextView(act).apply {
+        text = s
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
+        setTextColor(Color.WHITE)
+        if (bold) setTypeface(typeface, Typeface.BOLD)
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun renderMenu() {
+        val col = ((menu?.getChildAt(0) as? ScrollView)?.getChildAt(0) as? LinearLayout) ?: return
+        menuRows.forEachIndexed { i, r ->
+            val v = col.getChildAt(i + 1) as TextView
+            v.text = when {
+                r.kind == "header" -> r.label
+                else -> (if (r.on) "✓  " else "     ") + r.label + (if (r.restarts) "  ↻" else "")
+            }
+            v.setTextColor(if (r.kind == "header") 0xFFFFB627.toInt() else Color.WHITE)
+            v.setBackgroundColor(if (i == menuSel) 0xFF2E5BFF.toInt() else Color.TRANSPARENT)
+            if (i == menuSel) v.post { (col.parent as? ScrollView)?.let { s -> s.smoothScrollTo(0, maxOf(0, v.top - s.height / 2)) } }
+        }
+    }
+
+    /** Keys while the menu is open: Up/Down move, OK picks, Back/Left/Right close. True: used. */
+    private fun menuKey(e: KeyEvent): Boolean {
+        val down = e.action == KeyEvent.ACTION_DOWN
+        when (e.keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (down) {
+                    val step = if (e.keyCode == KeyEvent.KEYCODE_DPAD_UP) -1 else 1
+                    var i = menuSel + step
+                    while (i in menuRows.indices && !menuRows[i].selectable) i += step
+                    if (i in menuRows.indices) menuSel = i
+                    renderMenu()
+                }
+            }
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                if (down && e.repeatCount == 0) menuRows.getOrNull(menuSel)?.let { pickFromMenu(it) }
+            }
+            KeyEvent.KEYCODE_BACK -> if (e.action == KeyEvent.ACTION_UP) closeMenu()
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_CAPTIONS -> if (down) closeMenu()
+            else -> return false
+        }
+        return true
+    }
+
+    private fun pickFromMenu(r: MenuRow) {
+        closeMenu()
+        if (!r.selectable || r.on) return
+        val audio = r.kind == "audio"
+        if (r.restarts) {
+            ask(if (audio) RemoteAsk.Audio(r.id!!) else RemoteAsk.Subtitle(r.id), "Switching to ${r.label}…")
+            return
+        }
+        val pick = if (audio) pickAudio(tracks, r.id) else pickSubtitle(tracks, r.id)
+        if (pick == Pick.NoSuchTrack || pick == Pick.NotInStream) return
+        switchTrack(audio, r.id, pick)
+        flash(if (audio) "Audio: ${r.label}" else "Subtitles: ${r.label}")
+        pushTracks()
+    }
+
+    /** The track ids changed on the device: tell the box (once per change). */
+    private fun pushTracks() {
+        val now = on ?: return
+        if (now == toldOn) return
+        push(force = true)
+    }
+
     // ---------------------------------------------------------------- state
 
     private val listener = object : Player.Listener {
@@ -288,6 +534,26 @@ class VideoPlayer(
                     return
                 }
                 push(force = false)
+            }
+        }
+
+        override fun onTracksChanged(t: androidx.media3.common.Tracks) {
+            val p = player ?: return
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "video tracks: " + t.groups.joinToString { g ->
+                    val f = g.getTrackFormat(0)
+                    "${g.type}/${f.language}/${f.label}/${f.id}${if (g.isSelected) "*" else ""}"
+                })
+            }
+            if (tracks == null) return
+            val pending = wantAudio != null || wantSub != null
+            if (!applySelection(p)) return
+            if (pending) return // the next onTracksChanged shows the selection just applied
+            selectedOn(p)?.let { now ->
+                if (now != on) {
+                    on = now
+                    pushTracks()
+                }
             }
         }
 
@@ -328,8 +594,9 @@ class VideoPlayer(
         val s = state()
         if (!force && s == told) return
         told = s
+        toldOn = on
         lastPush = SystemClock.uptimeMillis()
-        send(ClientMsg.videoState(SCREEN_ID, s, seconds(p.currentPosition), durationOf(p)))
+        send(ClientMsg.videoState(SCREEN_ID, s, seconds(p.currentPosition), durationOf(p), tracks = on))
     }
 
     private fun reply(
@@ -339,9 +606,11 @@ class VideoPlayer(
         message: String? = null,
         state: String? = null,
         withTime: Boolean = false,
+        withTracks: Boolean = withTime,
     ) {
         val p = player?.takeIf { withTime }
-        send(ClientMsg.videoReply(m.requestId, ok, reason, message, state, p?.let { seconds(it.currentPosition) }, p?.let { durationOf(it) }))
+        val t = on?.takeIf { withTracks && player != null }
+        send(ClientMsg.videoReply(m.requestId, ok, reason, message, state, p?.let { seconds(it.currentPosition) }, p?.let { durationOf(it) }, t))
     }
 
     // ---------------------------------------------------------------- views
@@ -456,6 +725,17 @@ class VideoPlayer(
             val m = (totalS % 3600) / 60
             val s = totalS % 60
             return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+        }
+
+        /** A side subtitle's MIME type from the box's `format` (or the file's extension); WebVTT if unsure. */
+        private fun subtitleMime(format: String?, url: String): String {
+            val f = format ?: Uri.parse(url).lastPathSegment?.substringAfterLast('.', "")?.lowercase()
+            return when (f) {
+                "srt", "subrip" -> MimeTypes.APPLICATION_SUBRIP
+                "ass", "ssa" -> MimeTypes.TEXT_SSA
+                "ttml", "dfxp" -> MimeTypes.APPLICATION_TTML
+                else -> MimeTypes.TEXT_VTT
+            }
         }
 
         /** The box's mime is a hint; only HLS needs saying (MKV/MP4 are sniffed). */
